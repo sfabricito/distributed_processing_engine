@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use crate::common::types::{Task, WorkerId};
+use crate::common::types::{Task, WorkerId, WorkerInfo};
 
 use super::registry::Registry;
 
@@ -25,13 +25,47 @@ impl SchedulerStrategy for RoundRobinScheduler {
             self.queue = workers.iter().map(|w| w.id).collect();
         }
 
-        let worker_id = if let Some(id) = self.queue.pop_front() {
-            self.queue.push_back(id);
-            id
-        } else {
-            workers[self.cursor % workers.len()].id
-        };
+        let min_load = workers
+            .iter()
+            .map(|w| self.compute_load(w))
+            .min()
+            .unwrap_or(u32::MAX);
+        let least_loaded: Vec<WorkerId> = workers
+            .iter()
+            .filter(|w| self.compute_load(w) == min_load)
+            .map(|w| w.id)
+            .collect();
+
+        // Round-robin tie-breaker: walk the queue until we find an eligible worker.
+        let mut selected = None;
+        for _ in 0..self.queue.len() {
+            if let Some(id) = self.queue.pop_front() {
+                let eligible = least_loaded.contains(&id);
+                self.queue.push_back(id);
+                if eligible {
+                    selected = Some(id);
+                    break;
+                }
+            }
+        }
+
+        // Fallback to simple round-robin 
+        if selected.is_none() {
+            if let Some(id) = self.queue.pop_front() {
+                self.queue.push_back(id);
+                selected = Some(id);
+            }
+        }
+
         self.cursor = (self.cursor + 1) % workers.len();
-        Some(worker_id)
+        selected
+    }
+}
+
+impl RoundRobinScheduler {
+    fn compute_load(&self, worker: &WorkerInfo) -> u32 {
+        let tasks = worker.metrics.tasks_in_flight as u32;
+        let cpu = worker.metrics.cpu_pct as u32;
+        tasks * 2 + cpu
     }
 }
