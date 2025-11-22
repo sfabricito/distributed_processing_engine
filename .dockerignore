@@ -1,0 +1,5 @@
+target
+tmp
+*.log
+**/.git
+**/node_modules
