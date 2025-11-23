@@ -25,6 +25,10 @@ pub fn register_routes(base_path: &str, master: Arc<Master>) -> Router {
             &format!("{}/register", base),
             post(handlers::register_worker),
         )
+        .route(
+            &format!("{}/tasks/complete", base),
+            post(handlers::complete_task),
+        )
         .with_state(state)
 }
 

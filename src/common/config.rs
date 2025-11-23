@@ -12,6 +12,8 @@ pub struct Config {
     pub spill_threshold_mb: usize,
     pub task_timeout_ms: u64,
     pub heartbeat_interval_ms: u64,
+    pub max_parallel_tasks: usize,
+    pub task_retry_limit: u32,
     pub data_dir: PathBuf,
     pub result_dir: PathBuf,
     pub logs_dir: PathBuf,
@@ -29,6 +31,8 @@ impl Config {
             spill_threshold_mb: env_or("SPILL_THRESHOLD_MB", 256usize)?,
             task_timeout_ms: env_or("TASK_TIMEOUT_MS", 60_000u64)?,
             heartbeat_interval_ms: env_or("HEARTBEAT_INTERVAL_MS", 2_000u64)?,
+            max_parallel_tasks: env_or("MAX_PARALLEL_TASKS", 4usize)?,
+            task_retry_limit: env_or("TASK_RETRY_LIMIT", 1u32)?,
             data_dir: env_or::<String>("DATA_DIR", "./data".into()).map(PathBuf::from)?,
             result_dir: env_or::<String>("RESULT_DIR", "./results".into()).map(PathBuf::from)?,
             logs_dir: env_or::<String>("LOG_DIR", "./logs".into()).map(PathBuf::from)?,
@@ -68,5 +72,7 @@ mod tests {
         assert_eq!(cfg.master_port, 8080);
         assert_eq!(cfg.worker_threads, 4);
         assert_eq!(cfg.heartbeat_interval_ms, 2_000);
+        assert_eq!(cfg.max_parallel_tasks, 4);
+        assert_eq!(cfg.task_retry_limit, 1);
     }
 }

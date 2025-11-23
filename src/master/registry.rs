@@ -56,6 +56,10 @@ impl Registry {
         }
     }
 
+    pub fn get_worker(&self, worker_id: &WorkerId) -> Option<WorkerInfo> {
+        self.workers.get(worker_id).cloned()
+    }
+
     pub fn available_workers(&self) -> Vec<WorkerInfo> {
         self.workers
             .values()

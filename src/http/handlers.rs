@@ -64,6 +64,14 @@ pub async fn register_worker(
     Ok(Json(RegisterResponse { worker_id }))
 }
 
+pub async fn complete_task(
+    State(state): State<ApiState>,
+    Json(result): Json<TaskResult>,
+) -> Result<StatusCode, ApiError> {
+    state.master.complete_task(result)?;
+    Ok(StatusCode::OK)
+}
+
 fn parse_job_id(raw: &str) -> Result<JobId, ApiError> {
     JobId::parse_str(raw).map_err(|_| ApiError::BadRequest("invalid job id".into()))
 }

@@ -81,7 +81,9 @@ impl Master {
                 if let Some(job_state) = jobs_map.get_mut(&job_id) {
                     job_state.tasks.insert(task_id, normalized_status.clone());
                     if let Some(result) = opt_result {
-                        job_state.results.push(result);
+                        if matches!(result.status, TaskStatus::Completed) {
+                            job_state.results.push(result);
+                        }
                     }
                 } else {
                     // Orphan tasks: create a minimal placeholder job state so tasks aren't lost
@@ -89,7 +91,9 @@ impl Master {
                     tasks.insert(task_id, normalized_status.clone());
                     let mut results = Vec::new();
                     if let Some(r) = opt_result {
-                        results.push(r);
+                        if matches!(r.status, TaskStatus::Completed) {
+                            results.push(r);
+                        }
                     }
                     let placeholder = JobState {
                         dag: DagSpecification {
@@ -213,21 +217,32 @@ impl Master {
         if let Some(job_state) = jobs.get_mut(&result.job_id) {
             job_state
                 .tasks
-                .insert(result.task_id, TaskStatus::Completed);
-            job_state.results.push(result.clone());
+                .insert(result.task_id, result.status.clone());
             self.state_store.persist_task_result(&result)?;
 
-            let pending = job_state
-                .tasks
-                .values()
-                .any(|status| !matches!(status, TaskStatus::Completed));
-            if !pending {
-                job_state.status = JobStatus::Completed;
-                // Persist job completion
-                let dag = job_state.dag.clone();
-                let _ = self
-                    .state_store
-                    .persist_job(result.job_id, &dag, JobStatus::Completed);
+            match &result.status {
+                TaskStatus::Completed => {
+                    job_state.results.push(result.clone());
+                    let pending = job_state
+                        .tasks
+                        .values()
+                        .any(|status| !matches!(status, TaskStatus::Completed));
+                    if !pending {
+                        job_state.status = JobStatus::Completed;
+                        let dag = job_state.dag.clone();
+                        let _ =
+                            self.state_store
+                                .persist_job(result.job_id, &dag, JobStatus::Completed);
+                    }
+                }
+                TaskStatus::Failed(_) => {
+                    job_state.status = JobStatus::Failed;
+                    let dag = job_state.dag.clone();
+                    let _ = self
+                        .state_store
+                        .persist_job(result.job_id, &dag, JobStatus::Failed);
+                }
+                _ => {}
             }
         }
         Ok(())
@@ -268,6 +283,25 @@ impl Master {
                             .persist_job(task.job_id, &dag, JobStatus::Running);
                     }
                 }
+            }
+
+            // Dispatch the task to the worker via HTTP.
+            if let Some(worker_info) = {
+                let registry = self.registry.lock().unwrap();
+                registry.get_worker(&worker_id)
+            } {
+                let task_payload = task.clone();
+                let url = format!("http://{}/api/v1/tasks/execute", worker_info.address);
+                tokio::spawn(async move {
+                    let client = reqwest::Client::new();
+                    if let Err(err) = client.post(url).json(&task_payload).send().await {
+                        warn!(
+                            worker = %worker_id,
+                            task_id = %task_payload.task_id,
+                            "failed to dispatch task: {err}"
+                        );
+                    }
+                });
             }
 
             info!(

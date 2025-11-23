@@ -5,6 +5,7 @@ use std::{
 };
 
 use anyhow::Result;
+use serde_json::Value;
 use tracing::debug;
 use uuid::Uuid;
 
@@ -47,6 +48,19 @@ impl PartitionStore {
         let bytes = b"partition placeholder";
         debug!(target: "partition", path = %path.display(), "writing placeholder partition");
         self.spill_to_disk(path, bytes)
+    }
+
+    pub fn write_records(&self, path: &Path, records: &[Value]) -> Result<u64> {
+        let mut buf = Vec::new();
+        for rec in records {
+            let mut line = serde_json::to_vec(rec)?;
+            buf.append(&mut line);
+            buf.push(b'\n');
+        }
+        let bytes = buf.len() as u64;
+        debug!(target: "partition", path = %path.display(), bytes = bytes, "writing records to partition");
+        self.spill_to_disk(path, &buf)?;
+        Ok(bytes)
     }
 
     pub fn should_spill(&self, current_size_mb: usize) -> bool {

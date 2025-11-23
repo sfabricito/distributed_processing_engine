@@ -1,3 +1,4 @@
+use crate::common::dag::OperatorType;
 use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
 use thiserror::Error;
@@ -74,10 +75,12 @@ pub struct Task {
 pub struct TaskResult {
     pub task_id: TaskId,
     pub job_id: JobId,
+    pub operator: OperatorType,
     pub stage_id: StageId,
     pub partition: PartitionId,
     pub result_location: ResultLocation,
     pub metrics: TaskMetrics,
+    pub status: TaskStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

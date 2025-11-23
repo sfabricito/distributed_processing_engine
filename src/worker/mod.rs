@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
 use tracing::info;
 use uuid::Uuid;
 
@@ -11,6 +12,7 @@ use crate::common::{
 
 pub mod executor;
 pub mod monitor;
+pub mod ops;
 pub mod partition;
 
 pub struct Worker {
@@ -35,7 +37,11 @@ impl Worker {
             id: worker_id,
             listen_addr,
             master_addr: config.master_addr(),
-            executor: Arc::new(executor::Executor::new(config.clone(), worker_id)),
+            executor: Arc::new(executor::Executor::new(
+                config.clone(),
+                worker_id,
+                config.master_addr(),
+            )),
             config,
         }
     }
@@ -50,8 +56,7 @@ impl Worker {
             self.config.heartbeat_interval_ms,
         );
 
-        // In a full implementation this would start an HTTP/TCP server to receive tasks.
-        // For now we just keep the executor alive to illustrate scheduling.
+        self.spawn_task_api().await?;
         self.executor.run().await?;
         Ok(())
     }
@@ -76,6 +81,41 @@ impl Worker {
     }
 
     pub async fn handle_task(&self, task: Task) -> Result<()> {
-        self.executor.execute(task).await
+        self.executor.execute_and_report(task).await?;
+        Ok(())
+    }
+
+    async fn spawn_task_api(&self) -> Result<()> {
+        let state = TaskApiState {
+            executor: self.executor.clone(),
+        };
+        let app = Router::new()
+            .route("/api/v1/tasks/execute", post(execute_task))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind(&self.listen_addr).await?;
+        info!(addr = %self.listen_addr, "worker listening for tasks");
+
+        tokio::spawn(async move {
+            if let Err(err) = axum::serve(listener, app.into_make_service()).await {
+                tracing::warn!("task API server error: {err}");
+            }
+        });
+
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct TaskApiState {
+    executor: Arc<executor::Executor>,
+}
+
+async fn execute_task(State(state): State<TaskApiState>, Json(task): Json<Task>) -> StatusCode {
+    match state.executor.execute_and_report(task).await {
+        Ok(_) => StatusCode::ACCEPTED,
+        Err(err) => {
+            tracing::warn!("task execution failed: {err}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
     }
 }
