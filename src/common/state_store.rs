@@ -90,7 +90,7 @@ impl StateStore {
     /// Insert or update a task result and set status to Completed.
     pub fn persist_task_result(&self, result: &TaskResult) -> Result<()> {
         let result_json = serde_json::to_string_pretty(result)?;
-        let status_json = serde_json::to_string(&TaskStatus::Completed)?;
+        let status_json = serde_json::to_string(&result.status)?;
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         tx.execute(
