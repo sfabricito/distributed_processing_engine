@@ -112,18 +112,22 @@ impl Executor {
         }
     }
 
-    fn execute_sync(task: Task, store: Arc<PartitionStore>, config: Config) -> TaskResult {
+    fn execute_sync(task: Task, store: Arc<PartitionStore>, _config: Config) -> TaskResult {
         let start = Instant::now();
         let partition_id = task.partition as usize;
-        let total_partitions = config.max_parallel_tasks.max(1);
+        let total_partitions = task.total_partitions.max(1) as usize;
         let task_id = task.task_id;
         let job_id = task.job_id;
         let stage_id = task.stage_id;
         let partition = task.partition;
         let operator_def = task.operator.clone();
 
-        let read_op =
-            ops::read::ReadOp::new(task.input_uri.clone(), partition_id, total_partitions);
+        let read_op = ops::read::ReadOp::new(
+            task.input_uri.clone(),
+            task.input_format.clone(),
+            partition_id,
+            total_partitions,
+        );
         let operator = ops::Operator::try_from(operator_def.clone())
             .unwrap_or_else(|_| ops::Operator::Read(read_op.clone()));
         let operator_name = operator.name().to_string();

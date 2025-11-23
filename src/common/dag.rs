@@ -4,6 +4,7 @@ use super::types::{JobId, PartitionId, StageId, Task};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum OperatorType {
+    Read { uri: String, format: String },
     Map { script: String },
     Filter { predicate: String },
     Reduce { reducer: String },
@@ -28,7 +29,6 @@ pub struct DagEdge {
 pub struct DagSpecification {
     pub nodes: Vec<DagNode>,
     pub edges: Vec<DagEdge>,
-    pub input_uri: String,
     pub partitions: usize,
 }
 
@@ -55,6 +55,9 @@ impl DagSpecification {
 
     /// Creates a simple list of tasks assuming each stage has the same number of partitions.
     pub fn materialize_tasks(&self, job_id: JobId) -> Vec<Task> {
+        let Some((input_uri, input_format)) = self.read_source() else {
+            return Vec::new();
+        };
         let mut tasks = Vec::new();
         for stage in self.to_stages() {
             for partition in 0..stage.partitions {
@@ -70,12 +73,24 @@ impl DagSpecification {
                         attempt: 0,
                         operator: node.operator.clone(),
                         partition: partition as PartitionId,
-                        input_uri: self.input_uri.clone(),
+                        input_uri: input_uri.clone(),
+                        input_format: input_format.clone(),
+                        total_partitions: self.partitions as PartitionId,
                     });
                 }
             }
         }
         tasks
+    }
+
+    fn read_source(&self) -> Option<(String, String)> {
+        self.nodes.iter().find_map(|node| {
+            if let OperatorType::Read { uri, format } = &node.operator {
+                Some((uri.clone(), format.clone()))
+            } else {
+                None
+            }
+        })
     }
 }
 
@@ -88,10 +103,10 @@ mod tests {
         let json = r#"
         {
             "nodes": [
+                {"id": "read", "operator": {"Read": {"uri": "data/input.csv", "format": "csv"}}},
                 {"id": "n1", "operator": {"Map": {"script": "x + 1"}}}
             ],
             "edges": [],
-            "input_uri": "data/input.csv",
             "partitions": 2
         }
         "#;

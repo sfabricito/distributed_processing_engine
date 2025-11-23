@@ -69,6 +69,8 @@ pub struct Task {
     pub operator: crate::common::dag::OperatorType,
     pub partition: PartitionId,
     pub input_uri: String,
+    pub input_format: String,
+    pub total_partitions: PartitionId,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

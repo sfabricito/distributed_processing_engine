@@ -130,7 +130,7 @@ impl Master {
 
     pub async fn submit_job(&self, dag: DagSpecification) -> Result<JobId> {
         let job_id = Uuid::new_v4();
-    let tasks = dag.materialize_tasks(job_id);
+        let tasks = dag.materialize_tasks(job_id);
 
         let mut job_state = JobState {
             dag: dag.clone(),
@@ -149,7 +149,10 @@ impl Master {
                 .persist_task_status(task.task_id, job_id, TaskStatus::Queued)?;
         }
 
-        self.jobs.lock().unwrap_or_else(|e| e.into_inner()).insert(job_id, job_state);
+        self.jobs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(job_id, job_state);
 
         info!(job_id = %job_id, "new job submitted");
         for task in tasks {
@@ -160,7 +163,7 @@ impl Master {
     }
 
     pub fn get_job_status(&self, job_id: JobId) -> Result<JobStatus, EngineError> {
-    let guard = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
         guard
             .get(&job_id)
             .map(|state| state.status.clone())
@@ -168,7 +171,7 @@ impl Master {
     }
 
     pub fn get_job_results(&self, job_id: JobId) -> Result<Vec<TaskResult>, EngineError> {
-    let guard = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
         guard
             .get(&job_id)
             .map(|state| state.results.clone())
@@ -322,7 +325,7 @@ impl Master {
     }
 
     fn queued_tasks_snapshot(&self) -> Vec<Task> {
-    let guard = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
         let mut tasks = Vec::new();
 
         for (job_id, job_state) in guard.iter() {

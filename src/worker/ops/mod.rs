@@ -76,6 +76,12 @@ impl TryFrom<OperatorType> for Operator {
 
     fn try_from(value: OperatorType) -> Result<Self, Self::Error> {
         let op = match value {
+            OperatorType::Read { uri, format } => Operator::Read(read::ReadOp {
+                path: uri,
+                format,
+                partition_id: 0,
+                total_partitions: 1,
+            }),
             OperatorType::Map { script } => Operator::Map(map::MapOp { func: script }),
             OperatorType::Filter { predicate } => Operator::Filter(filter::FilterOp { predicate }),
             OperatorType::Join { on } => Operator::Join(JoinOp { on }),
