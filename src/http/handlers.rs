@@ -10,9 +10,7 @@ use tracing::warn;
 
 use crate::common::{
     dag::DagSpecification,
-    types::{
-        EngineError, HeartbeatMessage, JobId, JobStatus, TaskResult, WorkerId, WorkerInfo,
-    },
+    types::{EngineError, HeartbeatMessage, JobId, JobStatus, TaskResult, WorkerId, WorkerInfo},
 };
 use crate::master::Master;
 
@@ -62,7 +60,7 @@ pub async fn register_worker(
     State(state): State<ApiState>,
     Json(worker): Json<WorkerInfo>,
 ) -> Result<Json<RegisterResponse>, ApiError> {
-    let worker_id = state.master.register_worker(worker)?;
+    let worker_id = state.master.clone().register_worker(worker)?;
     Ok(Json(RegisterResponse { worker_id }))
 }
 

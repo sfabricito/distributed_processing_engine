@@ -49,7 +49,7 @@ impl SchedulerStrategy for RoundRobinScheduler {
             }
         }
 
-        // Fallback to simple round-robin 
+        // Fallback to simple round-robin
         if selected.is_none() {
             if let Some(id) = self.queue.pop_front() {
                 self.queue.push_back(id);

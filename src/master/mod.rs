@@ -1,6 +1,5 @@
 use std::{
     collections::HashMap,
-    path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -10,6 +9,7 @@ use tokio::task::JoinHandle;
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use crate::common::state_store::StateStore;
 use crate::common::{
     config::Config,
     dag::DagSpecification,
@@ -18,8 +18,8 @@ use crate::common::{
         WorkerId, WorkerInfo,
     },
 };
-use crate::master::scheduler::SchedulerStrategy;
 use crate::http;
+use crate::master::scheduler::SchedulerStrategy;
 
 pub mod registry;
 pub mod scheduler;
@@ -42,13 +42,78 @@ pub struct JobState {
 
 impl Master {
     pub fn new(config: Config) -> Arc<Self> {
-        Arc::new(Self {
+        let state_store = StateStore::new(config.result_dir.clone());
+
+        let master = Arc::new(Self {
             scheduler: Arc::new(Mutex::new(scheduler::RoundRobinScheduler::default())),
             registry: Arc::new(Mutex::new(registry::Registry::default())),
             jobs: Arc::new(Mutex::new(HashMap::new())),
-            state_store: StateStore::new(config.result_dir.clone()),
+            state_store,
             config,
-        })
+        });
+
+        // Load persisted jobs and tasks (best-effort; failures are logged but do not stop startup)
+        if let Ok(saved_jobs) = master.state_store.load_all_jobs() {
+            let mut jobs_map = master.jobs.lock().unwrap();
+            for (job_id, status, dag) in saved_jobs {
+                let job_state = JobState {
+                    dag,
+                    status,
+                    tasks: HashMap::new(),
+                    results: Vec::new(),
+                };
+                jobs_map.insert(job_id, job_state);
+            }
+        }
+
+        let mut tasks_to_requeue = Vec::new();
+        if let Ok(saved_tasks) = master.state_store.load_all_tasks() {
+            let mut jobs_map = master.jobs.lock().unwrap();
+            for (task_id, job_id, task_status, opt_result) in saved_tasks {
+                let normalized_status = match task_status {
+                    TaskStatus::Assigned(_) | TaskStatus::Running(_) => {
+                        tasks_to_requeue.push((task_id, job_id));
+                        TaskStatus::Queued
+                    }
+                    other => other,
+                };
+
+                if let Some(job_state) = jobs_map.get_mut(&job_id) {
+                    job_state.tasks.insert(task_id, normalized_status.clone());
+                    if let Some(result) = opt_result {
+                        job_state.results.push(result);
+                    }
+                } else {
+                    // Orphan tasks: create a minimal placeholder job state so tasks aren't lost
+                    let mut tasks = HashMap::new();
+                    tasks.insert(task_id, normalized_status.clone());
+                    let mut results = Vec::new();
+                    if let Some(r) = opt_result {
+                        results.push(r);
+                    }
+                    let placeholder = JobState {
+                        dag: DagSpecification {
+                            nodes: Vec::new(),
+                            edges: Vec::new(),
+                            input_uri: String::new(),
+                            partitions: 0,
+                        },
+                        status: JobStatus::Pending,
+                        tasks,
+                        results,
+                    };
+                    jobs_map.insert(job_id, placeholder);
+                }
+            }
+        }
+
+        for (task_id, job_id) in tasks_to_requeue {
+            let _ = master
+                .state_store
+                .persist_task_status(task_id, job_id, TaskStatus::Queued);
+        }
+
+        master
     }
 
     pub async fn start(self: Arc<Self>, base_path: &str) -> Result<()> {
@@ -71,20 +136,21 @@ impl Master {
             results: Vec::new(),
         };
 
+        // Persist the job row before tasks to satisfy the FK constraint.
+        self.state_store
+            .persist_job(job_id, &dag, JobStatus::Pending)?;
+
         for task in &tasks {
             job_state.tasks.insert(task.task_id, TaskStatus::Queued);
+            self.state_store
+                .persist_task_status(task.task_id, job_id, TaskStatus::Queued)?;
         }
 
         self.jobs.lock().unwrap().insert(job_id, job_state);
-        self.state_store.persist_job(job_id, &dag)?;
 
         info!(job_id = %job_id, "new job submitted");
         for task in tasks {
             self.schedule_task(task).await?;
-        }
-
-        if let Some(job_state) = self.jobs.lock().unwrap().get_mut(&job_id) {
-            job_state.status = JobStatus::Running;
         }
 
         Ok(job_id)
@@ -106,7 +172,7 @@ impl Master {
             .ok_or_else(|| EngineError::NotFound(format!("job {job_id} not found")))
     }
 
-    pub fn handle_heartbeat(&self, heartbeat: HeartbeatMessage) {
+    pub fn handle_heartbeat(self: &Arc<Self>, heartbeat: HeartbeatMessage) {
         if let Ok(mut registry) = self.registry.lock() {
             registry.record_heartbeat(
                 heartbeat.worker_id,
@@ -114,9 +180,14 @@ impl Master {
                 heartbeat.address.clone(),
             );
         }
+
+        let master = self.clone();
+        tokio::spawn(async move {
+            master.schedule_all_queued_tasks().await;
+        });
     }
 
-    pub fn register_worker(&self, info: WorkerInfo) -> Result<WorkerId> {
+    pub fn register_worker(self: Arc<Self>, info: WorkerInfo) -> Result<WorkerId> {
         let worker_id = info.id;
         if let Ok(mut registry) = self.registry.lock() {
             registry.add_worker(info.clone());
@@ -126,13 +197,23 @@ impl Master {
             address = %info.address,
             "worker registered"
         );
+
+        // After registering a new worker, try to schedule any queued tasks across jobs.
+        // We spawn a background task so the registration HTTP response is fast.
+        let master = self.clone();
+        tokio::spawn(async move {
+            master.schedule_all_queued_tasks().await;
+        });
+
         Ok(worker_id)
     }
 
     pub fn complete_task(&self, result: TaskResult) -> Result<()> {
         let mut jobs = self.jobs.lock().unwrap();
         if let Some(job_state) = jobs.get_mut(&result.job_id) {
-            job_state.tasks.insert(result.task_id, TaskStatus::Completed);
+            job_state
+                .tasks
+                .insert(result.task_id, TaskStatus::Completed);
             job_state.results.push(result.clone());
             self.state_store.persist_task_result(&result)?;
 
@@ -142,6 +223,11 @@ impl Master {
                 .any(|status| !matches!(status, TaskStatus::Completed));
             if !pending {
                 job_state.status = JobStatus::Completed;
+                // Persist job completion
+                let dag = job_state.dag.clone();
+                let _ = self
+                    .state_store
+                    .persist_job(result.job_id, &dag, JobStatus::Completed);
             }
         }
         Ok(())
@@ -163,6 +249,27 @@ impl Master {
                 }
             }
 
+            // persist task assignment
+            let _ = self.state_store.persist_task_status(
+                task.task_id,
+                task.job_id,
+                TaskStatus::Assigned(worker_id),
+            );
+
+            // When a task is assigned to a worker, mark the job as Running (if not already)
+            {
+                let mut jobs = self.jobs.lock().unwrap();
+                if let Some(job_state) = jobs.get_mut(&task.job_id) {
+                    if job_state.status != JobStatus::Running {
+                        job_state.status = JobStatus::Running;
+                        let dag = job_state.dag.clone();
+                        let _ = self
+                            .state_store
+                            .persist_job(task.job_id, &dag, JobStatus::Running);
+                    }
+                }
+            }
+
             info!(
                 job_id = %task.job_id,
                 task_id = %task.task_id,
@@ -181,11 +288,32 @@ impl Master {
         Ok(())
     }
 
+    fn queued_tasks_snapshot(&self) -> Vec<Task> {
+        let guard = self.jobs.lock().unwrap();
+        let mut tasks = Vec::new();
+
+        for (job_id, job_state) in guard.iter() {
+            for task in job_state.dag.materialize_tasks(*job_id) {
+                if matches!(job_state.tasks.get(&task.task_id), Some(TaskStatus::Queued)) {
+                    tasks.push(task);
+                }
+            }
+        }
+
+        tasks
+    }
+
+    async fn schedule_all_queued_tasks(self: Arc<Self>) {
+        let tasks = self.queued_tasks_snapshot();
+        for task in tasks {
+            let _ = self.clone().schedule_task(task).await;
+        }
+    }
+
     fn spawn_watchdog(self: Arc<Self>) -> JoinHandle<()> {
         tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(Duration::from_millis(
-                self.config.heartbeat_interval_ms * 2,
-            ));
+            let mut ticker =
+                tokio::time::interval(Duration::from_millis(self.config.heartbeat_interval_ms * 2));
             loop {
                 ticker.tick().await;
                 self.garbage_collect_workers();
@@ -197,31 +325,5 @@ impl Master {
         let mut registry = self.registry.lock().unwrap();
         let deadline = Duration::from_millis(self.config.heartbeat_interval_ms * 2);
         registry.mark_stale_workers(deadline);
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct StateStore {
-    base_path: PathBuf,
-}
-
-impl StateStore {
-    pub fn new(base_path: PathBuf) -> Self {
-        let _ = std::fs::create_dir_all(&base_path);
-        Self { base_path }
-    }
-
-    pub fn persist_job(&self, job_id: JobId, dag: &DagSpecification) -> Result<()> {
-        let path = self.base_path.join(format!("{job_id}.dag.json"));
-        let json = serde_json::to_string_pretty(dag)?;
-        std::fs::write(path, json)?;
-        Ok(())
-    }
-
-    pub fn persist_task_result(&self, result: &TaskResult) -> Result<()> {
-        let path = self.base_path.join(format!("{}_result.json", result.task_id));
-        let json = serde_json::to_string_pretty(result)?;
-        std::fs::write(path, json)?;
-        Ok(())
     }
 }

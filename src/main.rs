@@ -1,9 +1,6 @@
 use clap::{Parser, Subcommand};
 use distributed_processing_engine::{
-    client,
-    common::config::Config,
-    master::Master,
-    worker::Worker,
+    client, common::config::Config, master::Master, worker::Worker,
 };
 use tracing::info;
 use tracing_subscriber::prelude::*;
@@ -42,7 +39,10 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::Master => {
             let master = Master::new(config.clone());
-            info!("starting master node on {}:{}", config.master_host, config.master_port);
+            info!(
+                "starting master node on {}:{}",
+                config.master_host, config.master_port
+            );
             master.start(api_base).await?;
         }
         Command::Worker { port, id } => {
@@ -61,8 +61,8 @@ fn init_tracing(logs_dir: &std::path::Path) {
     use tracing::Level;
     use tracing_appender::non_blocking;
     use tracing_appender::rolling;
-    use tracing_subscriber::fmt;
     use tracing_subscriber::filter::filter_fn;
+    use tracing_subscriber::fmt;
 
     let _ = std::fs::create_dir_all(logs_dir);
 
@@ -96,8 +96,8 @@ fn init_tracing(logs_dir: &std::path::Path) {
 
     let console_layer = fmt::layer().json().with_target(false);
 
-    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| "info".into());
+    let env_filter =
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
 
     let subscriber = tracing_subscriber::registry()
         .with(env_filter)
