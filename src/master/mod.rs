@@ -54,7 +54,7 @@ impl Master {
 
         // Load persisted jobs and tasks (best-effort; failures are logged but do not stop startup)
         if let Ok(saved_jobs) = master.state_store.load_all_jobs() {
-            let mut jobs_map = master.jobs.lock().unwrap();
+            let mut jobs_map = master.jobs.lock().unwrap_or_else(|e| e.into_inner());
             for (job_id, status, dag) in saved_jobs {
                 let job_state = JobState {
                     dag,
@@ -68,7 +68,7 @@ impl Master {
 
         let mut tasks_to_requeue = Vec::new();
         if let Ok(saved_tasks) = master.state_store.load_all_tasks() {
-            let mut jobs_map = master.jobs.lock().unwrap();
+            let mut jobs_map = master.jobs.lock().unwrap_or_else(|e| e.into_inner());
             for (task_id, job_id, task_status, opt_result) in saved_tasks {
                 let normalized_status = match task_status {
                     TaskStatus::Assigned(_) | TaskStatus::Running(_) => {
@@ -99,7 +99,6 @@ impl Master {
                         dag: DagSpecification {
                             nodes: Vec::new(),
                             edges: Vec::new(),
-                            input_uri: String::new(),
                             partitions: 0,
                         },
                         status: JobStatus::Pending,
@@ -131,7 +130,7 @@ impl Master {
 
     pub async fn submit_job(&self, dag: DagSpecification) -> Result<JobId> {
         let job_id = Uuid::new_v4();
-        let tasks = dag.materialize_tasks(job_id);
+    let tasks = dag.materialize_tasks(job_id);
 
         let mut job_state = JobState {
             dag: dag.clone(),
@@ -150,7 +149,7 @@ impl Master {
                 .persist_task_status(task.task_id, job_id, TaskStatus::Queued)?;
         }
 
-        self.jobs.lock().unwrap().insert(job_id, job_state);
+        self.jobs.lock().unwrap_or_else(|e| e.into_inner()).insert(job_id, job_state);
 
         info!(job_id = %job_id, "new job submitted");
         for task in tasks {
@@ -161,7 +160,7 @@ impl Master {
     }
 
     pub fn get_job_status(&self, job_id: JobId) -> Result<JobStatus, EngineError> {
-        let guard = self.jobs.lock().unwrap();
+    let guard = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
         guard
             .get(&job_id)
             .map(|state| state.status.clone())
@@ -169,7 +168,7 @@ impl Master {
     }
 
     pub fn get_job_results(&self, job_id: JobId) -> Result<Vec<TaskResult>, EngineError> {
-        let guard = self.jobs.lock().unwrap();
+    let guard = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
         guard
             .get(&job_id)
             .map(|state| state.results.clone())
@@ -250,14 +249,14 @@ impl Master {
 
     async fn schedule_task(&self, task: Task) -> Result<()> {
         let worker = {
-            let registry = self.registry.lock().unwrap();
-            let mut scheduler = self.scheduler.lock().unwrap();
+            let registry = self.registry.lock().unwrap_or_else(|e| e.into_inner());
+            let mut scheduler = self.scheduler.lock().unwrap_or_else(|e| e.into_inner());
             scheduler.select_worker(&registry, &task)
         };
 
         if let Some(worker_id) = worker {
             {
-                let mut jobs = self.jobs.lock().unwrap();
+                let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(job) = jobs.get_mut(&task.job_id) {
                     job.tasks
                         .insert(task.task_id, TaskStatus::Assigned(worker_id));
@@ -273,7 +272,7 @@ impl Master {
 
             // When a task is assigned to a worker, mark the job as Running (if not already)
             {
-                let mut jobs = self.jobs.lock().unwrap();
+                let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(job_state) = jobs.get_mut(&task.job_id) {
                     if job_state.status != JobStatus::Running {
                         job_state.status = JobStatus::Running;
@@ -287,7 +286,7 @@ impl Master {
 
             // Dispatch the task to the worker via HTTP.
             if let Some(worker_info) = {
-                let registry = self.registry.lock().unwrap();
+                let registry = self.registry.lock().unwrap_or_else(|e| e.into_inner());
                 registry.get_worker(&worker_id)
             } {
                 let task_payload = task.clone();
@@ -323,7 +322,7 @@ impl Master {
     }
 
     fn queued_tasks_snapshot(&self) -> Vec<Task> {
-        let guard = self.jobs.lock().unwrap();
+    let guard = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
         let mut tasks = Vec::new();
 
         for (job_id, job_state) in guard.iter() {
@@ -356,7 +355,7 @@ impl Master {
     }
 
     fn garbage_collect_workers(&self) {
-        let mut registry = self.registry.lock().unwrap();
+        let mut registry = self.registry.lock().unwrap_or_else(|e| e.into_inner());
         let deadline = Duration::from_millis(self.config.heartbeat_interval_ms * 2);
         registry.mark_stale_workers(deadline);
     }
