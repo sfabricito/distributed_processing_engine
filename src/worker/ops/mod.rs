@@ -38,7 +38,6 @@ pub enum Operator {
     Read(read::ReadOp),
     Map(map::MapOp),
     Filter(filter::FilterOp),
-    // Placeholders for future operators
     FlatMap(FlatMapOp),
     Reduce(ReduceOp),
     ReduceByKey(ReduceByKeyOp),
@@ -92,7 +91,6 @@ impl TryFrom<OperatorType> for Operator {
             OperatorType::Identity => Operator::Map(map::MapOp {
                 func: "identity".into(),
             }),
-            // Reading is derived from task input URI; OperatorType does not encode it explicitly.
         };
 
         Ok(op)

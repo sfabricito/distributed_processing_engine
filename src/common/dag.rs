@@ -112,6 +112,14 @@ mod tests {
         "#;
         let dag: DagSpecification = serde_json::from_str(json).expect("should parse dag json");
         assert_eq!(dag.partitions, 2);
-        assert_eq!(dag.nodes.len(), 1);
+        assert_eq!(dag.nodes.len(), 2);
+
+        let stages = dag.to_stages();
+        assert_eq!(stages.len(), 2);
+        assert_eq!(stages[0].partitions, 2);
+        assert!(matches!(
+            stages[0].nodes.first().map(|node| &node.operator),
+            Some(OperatorType::Read { .. })
+        ));
     }
 }
