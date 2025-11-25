@@ -147,7 +147,9 @@ fn example_wordcount(input: PathBuf, partitions: usize) -> DagSpecification {
             DagNode {
                 id: "reduce".into(),
                 operator: OperatorType::Reduce {
-                    reducer: "sum counts".into(),
+                    key: Some("word".into()),
+                    func: "sum".into(),
+                    target_col: Some("count".into()),
                 },
             },
         ],

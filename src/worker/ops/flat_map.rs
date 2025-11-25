@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Context};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use super::{ExecutableOp, OpResult, PartitionData};
 
@@ -13,7 +13,9 @@ pub enum FlatMapError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlatMapOp {
     pub func: String,
-    /// NEW: Optional field to apply the flat_map on (e.g. "Product")
+    /// Optional column to pull input from (defaults to entire record)
+    pub input_col: Option<String>,
+    /// Optional column to write output into (defaults to emitting raw values)
     pub target_col: Option<String>,
 }
 
@@ -22,23 +24,28 @@ impl ExecutableOp for FlatMapOp {
         let mut out = Vec::new();
 
         for record in partition.records {
-            // 1. Determine the value to operate on
-            let val_to_process = if let Some(ref col) = self.target_col {
-                match record.get(col) {
+            let source_value = match self.input_col.as_deref() {
+                Some(col) => match record.get(col) {
                     Some(v) => v.clone(),
-                    None => continue, // Skip records missing the target column
-                }
-            } else {
-                record // Use the whole record if no column specified
+                    None => continue,
+                },
+                None => record.clone(),
             };
 
-            // 2. Apply the function (tokenize, split, etc)
-            let generated = apply_flat_fn(val_to_process, &self.func)
+            let generated = apply_flat_fn(source_value, &self.func)
                 .with_context(|| format!("flat_map applying '{}'", self.func))?;
 
-            // 3. Flatten results into the output
             for v in generated {
-                out.push(v);
+                if let Some(ref target) = self.target_col {
+                    let mut obj = match record.as_object() {
+                        Some(map) => map.clone(),
+                        None => Map::new(),
+                    };
+                    obj.insert(target.clone(), v);
+                    out.push(Value::Object(obj));
+                } else {
+                    out.push(v);
+                }
             }
         }
 

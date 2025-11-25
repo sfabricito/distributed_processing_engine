@@ -4,13 +4,32 @@ use super::types::{JobId, PartitionId, StageId, Task};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum OperatorType {
-    Read { uri: String, format: String },
-    Map { script: String },
-    Filter { predicate: String },
-    Reduce { reducer: String },
-    Join { on: String },
-    Aggregate { aggregation: String },
-    FlatMap { func: String },
+    Read {
+        uri: String,
+        format: String,
+    },
+    Map {
+        script: String,
+    },
+    Filter {
+        predicate: String,
+    },
+    Reduce {
+        key: Option<String>,
+        func: String,
+        target_col: Option<String>,
+    },
+    Join {
+        on: String,
+    },
+    Aggregate {
+        aggregation: String,
+    },
+    FlatMap {
+        func: String,
+        input_col: Option<String>,
+        target_col: Option<String>,
+    },
     Identity,
 }
 
@@ -113,6 +132,27 @@ mod tests {
         "#;
         let dag: DagSpecification = serde_json::from_str(json).expect("should parse dag json");
         assert_eq!(dag.partitions, 2);
-        assert_eq!(dag.nodes.len(), 1);
+        assert_eq!(dag.nodes.len(), 2);
+    }
+
+    #[test]
+    fn parses_flatmap_and_reduce_config() {
+        let json = r#"
+        {
+            "nodes": [
+                {"id": "fm", "operator": {"FlatMap": {"func": "tokenize", "input_col": "text", "target_col": "word"}}},
+                {"id": "rd", "operator": {"Reduce": {"key": "word", "func": "sum", "target_col": "count"}}}
+            ],
+            "edges": [{"from": "fm", "to": "rd"}],
+            "partitions": 1
+        }
+        "#;
+        let dag: DagSpecification = serde_json::from_str(json).expect("should parse dag json");
+        assert_eq!(dag.nodes.len(), 2);
+        assert!(matches!(
+            dag.nodes[0].operator,
+            OperatorType::FlatMap { .. }
+        ));
+        assert!(matches!(dag.nodes[1].operator, OperatorType::Reduce { .. }));
     }
 }

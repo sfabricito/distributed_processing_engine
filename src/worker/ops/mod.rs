@@ -7,10 +7,10 @@ use serde_json::Value;
 use crate::common::dag::OperatorType;
 
 pub mod filter;
+pub mod flat_map;
 pub mod map;
 pub mod read;
 pub mod reduce;
-pub mod flat_map;
 
 pub type Record = Value;
 
@@ -40,26 +40,9 @@ pub enum Operator {
     Read(read::ReadOp),
     Map(map::MapOp),
     Filter(filter::FilterOp),
-    // Placeholders for future operators
-    FlatMap(flat_map::FlatMapOp), 
+    FlatMap(flat_map::FlatMapOp),
     Reduce(reduce::ReduceOp),
-    Join(JoinOp),
     Shuffle(ShuffleOp),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct FlatMapOp {
-    pub func: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ReduceOp {
-    pub reducer: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct JoinOp {
-    pub on: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -80,15 +63,33 @@ impl TryFrom<OperatorType> for Operator {
             }),
             OperatorType::Map { script } => Operator::Map(map::MapOp { func: script }),
             OperatorType::Filter { predicate } => Operator::Filter(filter::FilterOp { predicate }),
-            OperatorType::Join { on } => Operator::Join(JoinOp { on }),
+            OperatorType::FlatMap {
+                func,
+                input_col,
+                target_col,
+            } => Operator::FlatMap(flat_map::FlatMapOp {
+                func,
+                input_col,
+                target_col,
+            }),
+            OperatorType::Reduce {
+                key,
+                func,
+                target_col,
+            } => Operator::Reduce(reduce::ReduceOp {
+                key,
+                func,
+                target_col,
+            }),
             OperatorType::Identity => Operator::Map(map::MapOp {
                 func: "identity".into(),
             }),
-            OperatorType::FlatMap { func } => Operator::FlatMap(flat_map::FlatMapOp { func, target_col: None }),
-            OperatorType::Reduce { .. } => return Err(anyhow!("Reduce operator not implemented yet")),
-            OperatorType::Aggregate { .. } => return Err(anyhow!("Aggregate operator not implemented yet")),
-            // Reading is derived from task input URI; OperatorType does not encode it explicitly.
-            _ => return Err(anyhow!("Unsupported operator type")),
+            OperatorType::Join { .. } => {
+                return Err(anyhow!("Join operator not supported in this build"))
+            }
+            OperatorType::Aggregate { .. } => {
+                return Err(anyhow!("Aggregate operator not implemented yet"))
+            }
         };
 
         Ok(op)
@@ -103,7 +104,6 @@ impl Operator {
             Operator::Filter(_) => "filter",
             Operator::FlatMap(_) => "flat_map",
             Operator::Reduce(_) => "reduce",
-            Operator::Join(_) => "join",
             Operator::Shuffle(_) => "shuffle",
         }
     }
@@ -115,26 +115,8 @@ impl Operator {
             Operator::Filter(op) => op.execute(input),
             Operator::FlatMap(op) => op.execute(input),
             Operator::Reduce(op) => op.execute(input),
-            Operator::Join(op) => op.execute(input),
             Operator::Shuffle(op) => op.execute(input),
         }
-    }
-}
-
-
-impl ExecutableOp for ReduceOp {
-    fn execute(&self, _partition: PartitionData) -> OpResult {
-        Err(anyhow!(
-            "ReduceOp not implemented yet (reducer={})",
-            self.reducer
-        ))
-    }
-}
-
-
-impl ExecutableOp for JoinOp {
-    fn execute(&self, _partition: PartitionData) -> OpResult {
-        Err(anyhow!("JoinOp not implemented yet (on={})", self.on))
     }
 }
 
@@ -144,5 +126,57 @@ impl ExecutableOp for ShuffleOp {
             "ShuffleOp not implemented yet (strategy={})",
             self.strategy
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flatmap_operator_wires_config() {
+        let op = Operator::try_from(OperatorType::FlatMap {
+            func: "tokenize".into(),
+            input_col: Some("text".into()),
+            target_col: Some("word".into()),
+        })
+        .expect("flatmap conversion");
+
+        let input = PartitionData {
+            partition_id: 0,
+            records: vec![serde_json::json!({"text": "hello world", "other": 1})],
+        };
+
+        let output = op.execute(input).expect("flatmap execute");
+        assert_eq!(output.records.len(), 2);
+        for rec in &output.records {
+            let word = rec.get("word").and_then(|v| v.as_str()).unwrap();
+            assert!(word == "hello" || word == "world");
+            assert_eq!(rec.get("other").and_then(|v| v.as_i64()), Some(1));
+        }
+    }
+
+    #[test]
+    fn reduce_operator_wires_config() {
+        let op = Operator::try_from(OperatorType::Reduce {
+            key: Some("k".into()),
+            func: "sum".into(),
+            target_col: Some("v".into()),
+        })
+        .expect("reduce conversion");
+
+        let input = PartitionData {
+            partition_id: 0,
+            records: vec![
+                serde_json::json!({"k": "a", "v": 1}),
+                serde_json::json!({"k": "a", "v": 2}),
+            ],
+        };
+
+        let output = op.execute(input).expect("reduce execute");
+        assert_eq!(output.records.len(), 1);
+        let rec = output.records.first().unwrap();
+        assert_eq!(rec.get("k").and_then(|v| v.as_str()), Some("a"));
+        assert_eq!(rec.get("value").and_then(|v| v.as_f64()), Some(3.0));
     }
 }

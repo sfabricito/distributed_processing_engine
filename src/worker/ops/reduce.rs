@@ -1,6 +1,6 @@
-use anyhow::{anyhow};
+use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, Number, Map};
+use serde_json::{Map, Number, Value};
 
 use super::{ExecutableOp, OpResult, PartitionData};
 
@@ -23,17 +23,26 @@ pub struct ReduceOp {
     pub key: Option<String>,
     pub func: String,
     /// NEW: Specifies which field to aggregate (e.g., "TotalRevenue")
-    pub target_col: Option<String>, 
+    pub target_col: Option<String>,
 }
 
 impl ExecutableOp for ReduceOp {
     fn execute(&self, partition: PartitionData) -> OpResult {
         let result = if let Some(ref k) = self.key {
             // Group by key, then reduce each group
-            reduce_by_key(&partition.records, k, &self.func, self.target_col.as_deref())?
+            reduce_by_key(
+                &partition.records,
+                k,
+                &self.func,
+                self.target_col.as_deref(),
+            )?
         } else {
             // Reduce everything into a single value
-            vec![reduce_global(&partition.records, &self.func, self.target_col.as_deref())?]
+            vec![reduce_global(
+                &partition.records,
+                &self.func,
+                self.target_col.as_deref(),
+            )?]
         };
 
         Ok(PartitionData {
@@ -43,7 +52,7 @@ impl ExecutableOp for ReduceOp {
     }
 }
 
-/// Aggregates a slice of records. 
+/// Aggregates a slice of records.
 /// If `col` is Some, it extracts that field before aggregating.
 fn reduce_global(records: &[Value], func: &str, col: Option<&str>) -> Result<Value, anyhow::Error> {
     match func {
@@ -51,11 +60,7 @@ fn reduce_global(records: &[Value], func: &str, col: Option<&str>) -> Result<Val
             let mut acc = 0.0;
             for r in records {
                 // Logic: Use the whole record if no col specified, otherwise extract col
-                let val_to_sum = if let Some(c) = col {
-                    r.get(c)
-                } else {
-                    Some(r)
-                };
+                let val_to_sum = if let Some(c) = col { r.get(c) } else { Some(r) };
 
                 if let Some(v) = val_to_sum {
                     if let Some(n) = v.as_f64() {
@@ -71,11 +76,7 @@ fn reduce_global(records: &[Value], func: &str, col: Option<&str>) -> Result<Val
         "concat" => {
             let mut acc = String::new();
             for r in records {
-                let val_to_concat = if let Some(c) = col {
-                    r.get(c)
-                } else {
-                    Some(r)
-                };
+                let val_to_concat = if let Some(c) = col { r.get(c) } else { Some(r) };
 
                 if let Some(v) = val_to_concat {
                     if let Some(s) = v.as_str() {
@@ -96,15 +97,14 @@ fn reduce_by_key(
     func: &str,
     target_col: Option<&str>,
 ) -> Result<Vec<Value>, anyhow::Error> {
-
     // 1. Group records by the value of `key`
-    let mut groups: std::collections::HashMap<String, Vec<Value>>
-        = std::collections::HashMap::new();
+    let mut groups: std::collections::HashMap<String, Vec<Value>> =
+        std::collections::HashMap::new();
 
     for r in records {
-        let obj = r.as_object().ok_or_else(|| {
-            anyhow!(ReduceError::MissingKey(key.to_string()))
-        })?;
+        let obj = r
+            .as_object()
+            .ok_or_else(|| anyhow!(ReduceError::MissingKey(key.to_string())))?;
 
         let k_val = obj
             .get(key)
@@ -119,7 +119,7 @@ fn reduce_by_key(
 
     for (k, vals) in groups {
         let reduced_val = reduce_global(&vals, func, target_col)?;
-        
+
         let mut obj = Map::new();
         obj.insert(key.to_string(), Value::String(k));
         // We output the result in a standard "value" field
