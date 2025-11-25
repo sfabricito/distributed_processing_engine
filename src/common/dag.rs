@@ -10,6 +10,7 @@ pub enum OperatorType {
     Reduce { reducer: String },
     Join { on: String },
     Aggregate { aggregation: String },
+    FlatMap { func: String },
     Identity,
 }
 

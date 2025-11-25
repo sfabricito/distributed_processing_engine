@@ -9,6 +9,8 @@ use crate::common::dag::OperatorType;
 pub mod filter;
 pub mod map;
 pub mod read;
+pub mod reduce;
+pub mod flat_map;
 
 pub type Record = Value;
 
@@ -39,9 +41,8 @@ pub enum Operator {
     Map(map::MapOp),
     Filter(filter::FilterOp),
     // Placeholders for future operators
-    FlatMap(FlatMapOp),
-    Reduce(ReduceOp),
-    ReduceByKey(ReduceByKeyOp),
+    FlatMap(flat_map::FlatMapOp), 
+    Reduce(reduce::ReduceOp),
     Join(JoinOp),
     Shuffle(ShuffleOp),
 }
@@ -53,11 +54,6 @@ pub struct FlatMapOp {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ReduceOp {
-    pub reducer: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ReduceByKeyOp {
     pub reducer: String,
 }
 
@@ -85,14 +81,14 @@ impl TryFrom<OperatorType> for Operator {
             OperatorType::Map { script } => Operator::Map(map::MapOp { func: script }),
             OperatorType::Filter { predicate } => Operator::Filter(filter::FilterOp { predicate }),
             OperatorType::Join { on } => Operator::Join(JoinOp { on }),
-            OperatorType::Reduce { reducer } => Operator::Reduce(ReduceOp { reducer }),
-            OperatorType::Aggregate { aggregation } => Operator::Reduce(ReduceOp {
-                reducer: aggregation,
-            }),
             OperatorType::Identity => Operator::Map(map::MapOp {
                 func: "identity".into(),
             }),
+            OperatorType::FlatMap { func } => Operator::FlatMap(flat_map::FlatMapOp { func, target_col: None }),
+            OperatorType::Reduce { .. } => return Err(anyhow!("Reduce operator not implemented yet")),
+            OperatorType::Aggregate { .. } => return Err(anyhow!("Aggregate operator not implemented yet")),
             // Reading is derived from task input URI; OperatorType does not encode it explicitly.
+            _ => return Err(anyhow!("Unsupported operator type")),
         };
 
         Ok(op)
@@ -107,7 +103,6 @@ impl Operator {
             Operator::Filter(_) => "filter",
             Operator::FlatMap(_) => "flat_map",
             Operator::Reduce(_) => "reduce",
-            Operator::ReduceByKey(_) => "reduce_by_key",
             Operator::Join(_) => "join",
             Operator::Shuffle(_) => "shuffle",
         }
@@ -120,21 +115,12 @@ impl Operator {
             Operator::Filter(op) => op.execute(input),
             Operator::FlatMap(op) => op.execute(input),
             Operator::Reduce(op) => op.execute(input),
-            Operator::ReduceByKey(op) => op.execute(input),
             Operator::Join(op) => op.execute(input),
             Operator::Shuffle(op) => op.execute(input),
         }
     }
 }
 
-impl ExecutableOp for FlatMapOp {
-    fn execute(&self, _partition: PartitionData) -> OpResult {
-        Err(anyhow!(
-            "FlatMapOp not implemented yet (func={})",
-            self.func
-        ))
-    }
-}
 
 impl ExecutableOp for ReduceOp {
     fn execute(&self, _partition: PartitionData) -> OpResult {
@@ -145,14 +131,6 @@ impl ExecutableOp for ReduceOp {
     }
 }
 
-impl ExecutableOp for ReduceByKeyOp {
-    fn execute(&self, _partition: PartitionData) -> OpResult {
-        Err(anyhow!(
-            "ReduceByKeyOp not implemented yet (reducer={})",
-            self.reducer
-        ))
-    }
-}
 
 impl ExecutableOp for JoinOp {
     fn execute(&self, _partition: PartitionData) -> OpResult {

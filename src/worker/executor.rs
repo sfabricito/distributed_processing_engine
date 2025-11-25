@@ -138,6 +138,7 @@ impl Executor {
                 ops::Operator::Read(op) => op.execute(base)?,
                 ops::Operator::Map(op) => op.execute(base)?,
                 ops::Operator::Filter(op) => op.execute(base)?,
+                ops::Operator::FlatMap(op) => op.execute(base)?,
                 _ => operator.execute(base)?,
             };
             Ok(data)
