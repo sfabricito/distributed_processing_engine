@@ -1,0 +1,3 @@
+{"text": "hello world from rust", "csv": "a,b,c", "chars": "ABC", "arr": [1,2,3]}
+{"text": "flat map operator test", "csv": "dog,cat,bird", "chars": "XYZ", "arr": ["x","y"]}
+{"text": "distributed processing engine", "csv": "1|2|3|4", "chars": "123", "arr": []}

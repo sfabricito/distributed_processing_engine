@@ -151,6 +151,7 @@ let operator_name = operator.name().to_string();
                 ops::Operator::Map(op) => op.execute(base)?,
                 ops::Operator::Filter(op) => op.execute(base)?,
                 ops::Operator::FlatMap(op) => op.execute(base)?,
+                ops::Operator::Reduce(op) => op.execute(base)?,
                 _ => operator.execute(base)?,
             };
             Ok(data)
