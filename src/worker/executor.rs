@@ -128,9 +128,21 @@ impl Executor {
             partition_id,
             total_partitions,
         );
-        let operator = ops::Operator::try_from(operator_def.clone())
-            .unwrap_or_else(|_| ops::Operator::Read(read_op.clone()));
-        let operator_name = operator.name().to_string();
+       // First: try to construct operator from OperatorType
+let mut operator = ops::Operator::try_from(operator_def.clone())
+    .unwrap_or_else(|_| ops::Operator::Read(read_op.clone()));
+
+// 🔥 CRITICAL FIX:
+// If the operator is a ReadOp, update it with *this task's* real partition info.
+// TryFrom creates a ReadOp with partition_id = 0 and total_partitions = 1.
+// We MUST overwrite those or tasks 1..N will always fail.
+if let ops::Operator::Read(op) = &mut operator {
+    op.partition_id = partition_id;
+    op.total_partitions = total_partitions;
+}
+
+let operator_name = operator.name().to_string();
+
 
         let pipeline = move || -> anyhow::Result<ops::PartitionData> {
             let base = read_op.execute(ops::PartitionData::empty(partition_id))?;

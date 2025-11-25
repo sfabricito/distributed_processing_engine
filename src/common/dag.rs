@@ -4,33 +4,54 @@ use super::types::{JobId, PartitionId, StageId, Task};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum OperatorType {
-    Read {
-        uri: String,
-        format: String,
-    },
-    Map {
-        script: String,
-    },
-    Filter {
-        predicate: String,
-    },
-    Reduce {
-        key: Option<String>,
-        func: String,
-        target_col: Option<String>,
-    },
-    Join {
-        on: String,
-    },
-    Aggregate {
-        aggregation: String,
-    },
-    FlatMap {
-        func: String,
-        input_col: Option<String>,
-        target_col: Option<String>,
-    },
+    Read(ReadOpConfig),
+    Map(MapOpConfig),
+    Filter(FilterOpConfig),
+    Reduce(ReduceOpConfig),
+    Join(JoinOpConfig),
+    Aggregate(AggregateOpConfig),
+    FlatMap(FlatMapOpConfig),
     Identity,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadOpConfig {
+    pub uri: String,
+    pub format: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MapOpConfig {
+    pub script: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FilterOpConfig {
+    pub predicate: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReduceOpConfig {
+    pub key: Option<String>,
+    pub func: String,
+    pub target_col: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JoinOpConfig {
+    pub on: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AggregateOpConfig {
+    pub aggregation: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlatMapOpConfig {
+    pub func: String,
+    pub input_col: Option<String>,
+    pub target_col: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,12 +126,21 @@ impl DagSpecification {
 
     fn read_source(&self) -> Option<(String, String)> {
         self.nodes.iter().find_map(|node| {
-            if let OperatorType::Read { uri, format } = &node.operator {
-                Some((uri.clone(), format.clone()))
-            } else {
-                None
-            }
+if let OperatorType::Read(cfg) = &node.operator {
+    Some((cfg.uri.clone(), cfg.format.clone()))
+} else {
+    None
+}
         })
+    }
+        pub fn set_read_uri(&mut self, uri: String) -> anyhow::Result<()> {
+        for node in self.nodes.iter_mut() {
+            if let OperatorType::Read(cfg) = &mut node.operator {
+                cfg.uri = uri.clone();
+                return Ok(());
+            }
+        }
+        anyhow::bail!("DAG does not contain a Read operator to set input");
     }
 }
 

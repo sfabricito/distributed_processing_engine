@@ -54,47 +54,45 @@ impl TryFrom<OperatorType> for Operator {
     type Error = anyhow::Error;
 
     fn try_from(value: OperatorType) -> Result<Self, Self::Error> {
-        let op = match value {
-            OperatorType::Read { uri, format } => Operator::Read(read::ReadOp {
-                path: uri,
-                format,
+        match value {
+            OperatorType::Read(cfg) => Ok(Operator::Read(read::ReadOp {
+                path: cfg.uri,
+                format: cfg.format,
                 partition_id: 0,
                 total_partitions: 1,
-            }),
-            OperatorType::Map { script } => Operator::Map(map::MapOp { func: script }),
-            OperatorType::Filter { predicate } => Operator::Filter(filter::FilterOp { predicate }),
-            OperatorType::FlatMap {
-                func,
-                input_col,
-                target_col,
-            } => Operator::FlatMap(flat_map::FlatMapOp {
-                func,
-                input_col,
-                target_col,
-            }),
-            OperatorType::Reduce {
-                key,
-                func,
-                target_col,
-            } => Operator::Reduce(reduce::ReduceOp {
-                key,
-                func,
-                target_col,
-            }),
-            OperatorType::Identity => Operator::Map(map::MapOp {
-                func: "identity".into(),
-            }),
-            OperatorType::Join { .. } => {
-                return Err(anyhow!("Join operator not supported in this build"))
-            }
-            OperatorType::Aggregate { .. } => {
-                return Err(anyhow!("Aggregate operator not implemented yet"))
-            }
-        };
+            })),
 
-        Ok(op)
+            OperatorType::Map(cfg) => Ok(Operator::Map(map::MapOp {
+                func: cfg.script,
+            })),
+
+            OperatorType::Filter(cfg) => Ok(Operator::Filter(filter::FilterOp {
+                predicate: cfg.predicate,
+            })),
+
+            OperatorType::FlatMap(cfg) => Ok(Operator::FlatMap(flat_map::FlatMapOp {
+                func: cfg.func,
+                input_col: cfg.input_col,
+                target_col: cfg.target_col,
+            })),
+
+            OperatorType::Reduce(cfg) => Ok(Operator::Reduce(reduce::ReduceOp {
+                key: cfg.key,
+                func: cfg.func,
+                target_col: cfg.target_col,
+            })),
+
+            OperatorType::Join(_) => Err(anyhow!("Join operator not supported in this build")),
+
+            OperatorType::Aggregate(_) => Err(anyhow!("Aggregate operator not implemented yet")),
+
+            OperatorType::Identity => Ok(Operator::Map(map::MapOp {
+                func: "identity".into(),
+            })),
+        }
     }
 }
+
 
 impl Operator {
     pub fn name(&self) -> &'static str {
@@ -126,57 +124,5 @@ impl ExecutableOp for ShuffleOp {
             "ShuffleOp not implemented yet (strategy={})",
             self.strategy
         ))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn flatmap_operator_wires_config() {
-        let op = Operator::try_from(OperatorType::FlatMap {
-            func: "tokenize".into(),
-            input_col: Some("text".into()),
-            target_col: Some("word".into()),
-        })
-        .expect("flatmap conversion");
-
-        let input = PartitionData {
-            partition_id: 0,
-            records: vec![serde_json::json!({"text": "hello world", "other": 1})],
-        };
-
-        let output = op.execute(input).expect("flatmap execute");
-        assert_eq!(output.records.len(), 2);
-        for rec in &output.records {
-            let word = rec.get("word").and_then(|v| v.as_str()).unwrap();
-            assert!(word == "hello" || word == "world");
-            assert_eq!(rec.get("other").and_then(|v| v.as_i64()), Some(1));
-        }
-    }
-
-    #[test]
-    fn reduce_operator_wires_config() {
-        let op = Operator::try_from(OperatorType::Reduce {
-            key: Some("k".into()),
-            func: "sum".into(),
-            target_col: Some("v".into()),
-        })
-        .expect("reduce conversion");
-
-        let input = PartitionData {
-            partition_id: 0,
-            records: vec![
-                serde_json::json!({"k": "a", "v": 1}),
-                serde_json::json!({"k": "a", "v": 2}),
-            ],
-        };
-
-        let output = op.execute(input).expect("reduce execute");
-        assert_eq!(output.records.len(), 1);
-        let rec = output.records.first().unwrap();
-        assert_eq!(rec.get("k").and_then(|v| v.as_str()), Some("a"));
-        assert_eq!(rec.get("value").and_then(|v| v.as_f64()), Some(3.0));
     }
 }

@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::common::{
     config::Config,
-    dag::{DagEdge, DagNode, DagSpecification, OperatorType},
+    dag::{DagEdge, DagNode, DagSpecification, OperatorType, ReadOpConfig, MapOpConfig, ReduceOpConfig},
     types::{JobId, JobStatus, TaskResult},
 };
 
@@ -57,7 +57,7 @@ pub async fn execute_client(cmd: ClientCommand, config: &Config) -> Result<()> {
             let mut spec: DagSpecification =
                 serde_json::from_str(&dag_json).context("parsing dag json")?;
             if let Some(input) = input {
-                set_read_uri(&mut spec, input)?;
+                spec.set_read_uri(input)?;
             }
             if let Some(parts) = partitions {
                 spec.partitions = parts;
@@ -133,24 +133,24 @@ fn example_wordcount(input: PathBuf, partitions: usize) -> DagSpecification {
         nodes: vec![
             DagNode {
                 id: "read".into(),
-                operator: OperatorType::Read {
+                operator: OperatorType::Read(ReadOpConfig {
                     uri: input.display().to_string(),
                     format: "csv".into(),
-                },
+                }),
             },
             DagNode {
                 id: "map".into(),
-                operator: OperatorType::Map {
+                operator: OperatorType::Map(MapOpConfig {
                     script: "split lines".into(),
-                },
+                }),
             },
             DagNode {
                 id: "reduce".into(),
-                operator: OperatorType::Reduce {
+                operator: OperatorType::Reduce(ReduceOpConfig {
                     key: Some("word".into()),
                     func: "sum".into(),
                     target_col: Some("count".into()),
-                },
+                }),
             },
         ],
         edges: vec![
@@ -165,14 +165,4 @@ fn example_wordcount(input: PathBuf, partitions: usize) -> DagSpecification {
         ],
         partitions,
     }
-}
-
-fn set_read_uri(spec: &mut DagSpecification, uri: String) -> Result<()> {
-    for node in spec.nodes.iter_mut() {
-        if let OperatorType::Read { uri: u, .. } = &mut node.operator {
-            *u = uri.clone();
-            return Ok(());
-        }
-    }
-    anyhow::bail!("DAG does not contain a Read operator to set input");
 }
