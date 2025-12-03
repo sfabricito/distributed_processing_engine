@@ -1,5 +1,8 @@
 use std::panic::{self, AssertUnwindSafe};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc, Mutex,
+};
 use std::time::Instant;
 
 use anyhow::Result;
@@ -24,6 +27,10 @@ pub struct Executor {
     store: Arc<PartitionStore>,
     client: reqwest::Client,
     permits: Arc<Semaphore>,
+    tasks_completed: AtomicUsize,
+    tasks_failed: AtomicUsize,
+    records_processed: AtomicUsize,
+    active_task: Mutex<Option<uuid::Uuid>>,
 }
 
 impl Executor {
@@ -36,6 +43,10 @@ impl Executor {
             client: reqwest::Client::new(),
             permits: Arc::new(Semaphore::new(max_parallel)),
             config,
+            tasks_completed: AtomicUsize::new(0),
+            tasks_failed: AtomicUsize::new(0),
+            records_processed: AtomicUsize::new(0),
+            active_task: Mutex::new(None),
         }
     }
 
@@ -59,8 +70,23 @@ impl Executor {
         let mut attempt = 0;
         loop {
             attempt += 1;
+            {
+                let mut guard = self.active_task.lock().unwrap_or_else(|e| e.into_inner());
+                *guard = Some(task.task_id);
+            }
             let result = self.execute_once(task.clone()).await;
             let is_failed = matches!(result.status, TaskStatus::Failed(_));
+            match result.status {
+                TaskStatus::Completed => {
+                    self.tasks_completed.fetch_add(1, Ordering::Relaxed);
+                    self.records_processed
+                        .fetch_add(result.metrics.processed_records, Ordering::Relaxed);
+                }
+                TaskStatus::Failed(_) => {
+                    self.tasks_failed.fetch_add(1, Ordering::Relaxed);
+                }
+                _ => {}
+            }
             if is_failed && attempt <= self.config.task_retry_limit {
                 warn!(
                     task_id = %task.task_id,
@@ -68,6 +94,10 @@ impl Executor {
                     "task failed; retrying"
                 );
                 continue;
+            }
+            {
+                let mut guard = self.active_task.lock().unwrap_or_else(|e| e.into_inner());
+                *guard = None;
             }
             return result;
         }
@@ -80,6 +110,24 @@ impl Executor {
             warn!(task_id = %result.task_id, "failed to send result to master: {err}");
         }
         Ok(result)
+    }
+
+    pub fn snapshot_metrics(&self) -> crate::common::types::WorkerMetrics {
+        let max_parallel = self.config.max_parallel_tasks.max(1);
+        let available = self.permits.available_permits();
+        crate::common::types::WorkerMetrics {
+            tasks_in_flight: max_parallel.saturating_sub(available),
+            cpu_pct: 0.0,
+            memory_mb: 0,
+            tasks_completed: self.tasks_completed.load(Ordering::Relaxed),
+            tasks_failed: self.tasks_failed.load(Ordering::Relaxed),
+            records_processed: self.records_processed.load(Ordering::Relaxed),
+            current_task: self
+                .active_task
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+        }
     }
 
     async fn execute_once(&self, task: Task) -> TaskResult {
@@ -300,6 +348,8 @@ impl Executor {
                             metrics: TaskMetrics {
                                 processed_records,
                                 duration_ms,
+                                cpu_time_ms: duration_ms,
+                                wall_time_ms: duration_ms,
                             },
                             status: TaskStatus::Completed,
                             trace: Some(trace.clone()),
@@ -380,6 +430,8 @@ impl Executor {
             metrics: TaskMetrics {
                 processed_records: 0,
                 duration_ms,
+                cpu_time_ms: duration_ms,
+                wall_time_ms: duration_ms,
             },
             status: TaskStatus::Failed(format!("{operator_name}: {error}")),
             trace: None,

@@ -15,7 +15,7 @@ use crate::common::{
     dag::DagSpecification,
     types::{
         EngineError, HeartbeatMessage, JobId, JobStatus, Task, TaskId, TaskResult, TaskStatus,
-        WorkerId, WorkerInfo,
+        WorkerId, WorkerInfo, WorkerStatus,
     },
 };
 use crate::http;
@@ -38,6 +38,8 @@ pub struct JobState {
     pub status: JobStatus,
     pub tasks: HashMap<TaskId, TaskStatus>,
     pub results: Vec<TaskResult>,
+    pub metrics: crate::common::types::JobMetrics,
+    pub error: Option<String>,
 }
 
 impl Master {
@@ -61,6 +63,8 @@ impl Master {
                     status,
                     tasks: HashMap::new(),
                     results: Vec::new(),
+                    metrics: crate::common::types::JobMetrics::default(),
+                    error: None,
                 };
                 jobs_map.insert(job_id, job_state);
             }
@@ -104,6 +108,8 @@ impl Master {
                         status: JobStatus::Pending,
                         tasks,
                         results,
+                        metrics: crate::common::types::JobMetrics::default(),
+                        error: None,
                     };
                     jobs_map.insert(job_id, placeholder);
                 }
@@ -134,20 +140,44 @@ impl Master {
 
         let mut job_state = JobState {
             dag: dag.clone(),
-            status: JobStatus::Pending,
+            status: JobStatus::Accepted,
             tasks: HashMap::new(),
             results: Vec::new(),
+            metrics: crate::common::types::JobMetrics {
+                total_tasks: tasks.len(),
+                pending_tasks: tasks.len(),
+                stages: dag
+                    .to_stages()
+                    .iter()
+                    .map(|s| crate::common::types::StageMetrics {
+                        stage_id: s.stage_id,
+                        tasks_total: s.partitions,
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            },
+            error: None,
         };
 
         // Persist the job row before tasks to satisfy the FK constraint.
         self.state_store
-            .persist_job(job_id, &dag, JobStatus::Pending)?;
+            .persist_job(job_id, &dag, JobStatus::Accepted)?;
 
         for task in &tasks {
             job_state.tasks.insert(task.task_id, TaskStatus::Queued);
             self.state_store
                 .persist_task_status(task.task_id, job_id, TaskStatus::Queued)?;
         }
+
+        let _ = self.state_store.persist_job_status(
+            job_id,
+            JobStatus::Accepted,
+            0.0,
+            &job_state.metrics,
+            None,
+            &[],
+        );
 
         self.jobs
             .lock()
@@ -162,12 +192,54 @@ impl Master {
         Ok(job_id)
     }
 
-    pub fn get_job_status(&self, job_id: JobId) -> Result<JobStatus, EngineError> {
+    pub fn get_job_status(
+        &self,
+        job_id: JobId,
+    ) -> Result<crate::http::handlers::JobStatusResponse, EngineError> {
         let guard = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
-        guard
+        let job = guard
             .get(&job_id)
-            .map(|state| state.status.clone())
-            .ok_or_else(|| EngineError::NotFound(format!("job {job_id} not found")))
+            .ok_or_else(|| EngineError::NotFound(format!("job {job_id} not found")))?;
+
+        let progress = if job.metrics.total_tasks == 0 {
+            0.0
+        } else {
+            (job.metrics.completed_tasks as f32 / job.metrics.total_tasks as f32) * 100.0
+        };
+        let mut metrics = job.metrics.clone();
+        if let Ok(registry) = self.registry.lock() {
+            for worker in registry.available_workers() {
+                let agg = crate::common::types::WorkerAggregate {
+                    worker_id: worker.id,
+                    tasks_completed: worker.metrics.tasks_completed,
+                    tasks_failed: worker.metrics.tasks_failed,
+                    records_processed: worker.metrics.records_processed,
+                    cpu_time_ms: 0,
+                    wall_time_ms: 0,
+                };
+                if let Some(existing) = metrics
+                    .workers
+                    .iter_mut()
+                    .find(|w| w.worker_id == worker.id)
+                {
+                    *existing = agg;
+                } else {
+                    metrics.workers.push(agg);
+                }
+            }
+        }
+        Ok(crate::http::handlers::JobStatusResponse {
+            job_id,
+            status: job.status.clone(),
+            progress,
+            metrics,
+            error: job.error.clone(),
+            outputs: job
+                .results
+                .iter()
+                .map(|r| r.result_location.path.clone())
+                .collect(),
+        })
     }
 
     pub fn get_job_results(&self, job_id: JobId) -> Result<Vec<TaskResult>, EngineError> {
@@ -182,10 +254,16 @@ impl Master {
         if let Ok(mut registry) = self.registry.lock() {
             registry.record_heartbeat(
                 heartbeat.worker_id,
-                heartbeat.metrics,
+                heartbeat.metrics.clone(),
                 heartbeat.address.clone(),
             );
         }
+
+        let _ = self.state_store.persist_worker_metrics(
+            heartbeat.worker_id,
+            WorkerStatus::Active,
+            &heartbeat.metrics,
+        );
 
         let master = self.clone();
         tokio::spawn(async move {
@@ -225,24 +303,151 @@ impl Master {
             match &result.status {
                 TaskStatus::Completed => {
                     job_state.results.push(result.clone());
+                    job_state.metrics.completed_tasks += 1;
+                    job_state.metrics.pending_tasks = job_state.metrics.total_tasks.saturating_sub(
+                        job_state.metrics.completed_tasks + job_state.metrics.failed_tasks,
+                    );
+                    job_state
+                        .metrics
+                        .stages
+                        .iter_mut()
+                        .find(|s| s.stage_id == result.stage_id)
+                        .map(|s| {
+                            s.tasks_completed += 1;
+                            s.duration_ms += result.metrics.duration_ms;
+                        });
+                    // per-worker aggregation (best effort from registry)
+                    let worker_id = match job_state.tasks.get(&result.task_id) {
+                        Some(TaskStatus::Assigned(w)) | Some(TaskStatus::Running(w)) => Some(*w),
+                        _ => None,
+                    };
+                    if let Some(wid) = worker_id {
+                        if let Some(worker_metric) = job_state
+                            .metrics
+                            .workers
+                            .iter_mut()
+                            .find(|w| w.worker_id == wid)
+                        {
+                            worker_metric.tasks_completed += 1;
+                            worker_metric.records_processed += result.metrics.processed_records;
+                            worker_metric.cpu_time_ms += result.metrics.cpu_time_ms;
+                            worker_metric.wall_time_ms += result.metrics.wall_time_ms;
+                        } else {
+                            job_state
+                                .metrics
+                                .workers
+                                .push(crate::common::types::WorkerAggregate {
+                                    worker_id: wid,
+                                    tasks_completed: 1,
+                                    tasks_failed: 0,
+                                    records_processed: result.metrics.processed_records,
+                                    cpu_time_ms: result.metrics.cpu_time_ms,
+                                    wall_time_ms: result.metrics.wall_time_ms,
+                                });
+                        }
+                    }
                     let pending = job_state
                         .tasks
                         .values()
                         .any(|status| !matches!(status, TaskStatus::Completed));
                     if !pending {
-                        job_state.status = JobStatus::Completed;
+                        job_state.status = JobStatus::Succeeded;
                         let dag = job_state.dag.clone();
                         let _ =
                             self.state_store
-                                .persist_job(result.job_id, &dag, JobStatus::Completed);
+                                .persist_job(result.job_id, &dag, JobStatus::Succeeded);
+                        let _ = self.state_store.persist_job_status(
+                            result.job_id,
+                            JobStatus::Succeeded,
+                            100.0,
+                            &job_state.metrics,
+                            None,
+                            &job_state
+                                .results
+                                .iter()
+                                .map(|r| r.result_location.path.clone())
+                                .collect::<Vec<_>>(),
+                        );
+                    } else {
+                        let progress = if job_state.metrics.total_tasks == 0 {
+                            0.0
+                        } else {
+                            (job_state.metrics.completed_tasks as f32
+                                / job_state.metrics.total_tasks as f32)
+                                * 100.0
+                        };
+                        let _ = self.state_store.persist_job_status(
+                            result.job_id,
+                            job_state.status.clone(),
+                            progress,
+                            &job_state.metrics,
+                            job_state.error.clone(),
+                            &job_state
+                                .results
+                                .iter()
+                                .map(|r| r.result_location.path.clone())
+                                .collect::<Vec<_>>(),
+                        );
                     }
                 }
                 TaskStatus::Failed(_) => {
+                    job_state.metrics.failed_tasks += 1;
+                    job_state.metrics.pending_tasks = job_state.metrics.total_tasks.saturating_sub(
+                        job_state.metrics.completed_tasks + job_state.metrics.failed_tasks,
+                    );
                     job_state.status = JobStatus::Failed;
+                    job_state.error = match &result.status {
+                        TaskStatus::Failed(msg) => Some(msg.clone()),
+                        _ => None,
+                    };
+                    if let Some(wid) = match job_state.tasks.get(&result.task_id) {
+                        Some(TaskStatus::Assigned(w)) | Some(TaskStatus::Running(w)) => Some(*w),
+                        _ => None,
+                    } {
+                        if let Some(worker_metric) = job_state
+                            .metrics
+                            .workers
+                            .iter_mut()
+                            .find(|w| w.worker_id == wid)
+                        {
+                            worker_metric.tasks_failed += 1;
+                        } else {
+                            job_state
+                                .metrics
+                                .workers
+                                .push(crate::common::types::WorkerAggregate {
+                                    worker_id: wid,
+                                    tasks_completed: 0,
+                                    tasks_failed: 1,
+                                    records_processed: 0,
+                                    cpu_time_ms: 0,
+                                    wall_time_ms: 0,
+                                });
+                        }
+                    }
                     let dag = job_state.dag.clone();
                     let _ = self
                         .state_store
                         .persist_job(result.job_id, &dag, JobStatus::Failed);
+                    let progress = if job_state.metrics.total_tasks == 0 {
+                        0.0
+                    } else {
+                        (job_state.metrics.completed_tasks as f32
+                            / job_state.metrics.total_tasks as f32)
+                            * 100.0
+                    };
+                    let _ = self.state_store.persist_job_status(
+                        result.job_id,
+                        JobStatus::Failed,
+                        progress,
+                        &job_state.metrics,
+                        job_state.error.clone(),
+                        &job_state
+                            .results
+                            .iter()
+                            .map(|r| r.result_location.path.clone())
+                            .collect::<Vec<_>>(),
+                    );
                 }
                 _ => {}
             }
@@ -283,6 +488,25 @@ impl Master {
                         let _ = self
                             .state_store
                             .persist_job(task.job_id, &dag, JobStatus::Running);
+                        let progress = if job_state.metrics.total_tasks == 0 {
+                            0.0
+                        } else {
+                            (job_state.metrics.completed_tasks as f32
+                                / job_state.metrics.total_tasks as f32)
+                                * 100.0
+                        };
+                        let _ = self.state_store.persist_job_status(
+                            task.job_id,
+                            JobStatus::Running,
+                            progress,
+                            &job_state.metrics,
+                            job_state.error.clone(),
+                            &job_state
+                                .results
+                                .iter()
+                                .map(|r| r.result_location.path.clone())
+                                .collect::<Vec<_>>(),
+                        );
                     }
                 }
             }

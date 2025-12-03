@@ -14,14 +14,26 @@ pub type PartitionId = u64;
 pub enum WorkerStatus {
     Active,
     Down,
+    Idle,
+    Running,
+    Failed,
+    Lost,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum JobStatus {
+    Accepted,
     Pending,
     Running,
     Completed,
+    Succeeded,
     Failed,
+}
+
+impl Default for JobStatus {
+    fn default() -> Self {
+        JobStatus::Pending
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -39,6 +51,14 @@ pub struct WorkerMetrics {
     pub tasks_in_flight: usize,
     pub cpu_pct: f32,
     pub memory_mb: usize,
+    #[serde(default)]
+    pub tasks_completed: usize,
+    #[serde(default)]
+    pub tasks_failed: usize,
+    #[serde(default)]
+    pub records_processed: usize,
+    #[serde(default)]
+    pub current_task: Option<TaskId>,
 }
 
 impl Default for WorkerMetrics {
@@ -47,6 +67,10 @@ impl Default for WorkerMetrics {
             tasks_in_flight: 0,
             cpu_pct: 0.0,
             memory_mb: 0,
+            tasks_completed: 0,
+            tasks_failed: 0,
+            records_processed: 0,
+            current_task: None,
         }
     }
 }
@@ -99,6 +123,10 @@ pub struct TaskResult {
 pub struct TaskMetrics {
     pub processed_records: usize,
     pub duration_ms: u128,
+    #[serde(default)]
+    pub cpu_time_ms: u128,
+    #[serde(default)]
+    pub wall_time_ms: u128,
 }
 
 impl Default for TaskMetrics {
@@ -106,6 +134,8 @@ impl Default for TaskMetrics {
         Self {
             processed_records: 0,
             duration_ms: 0,
+            cpu_time_ms: 0,
+            wall_time_ms: 0,
         }
     }
 }
@@ -135,6 +165,47 @@ pub struct PartitionInfo {
     pub partition_id: usize,
     pub record_count: usize,
     pub spill_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct JobStateView {
+    pub job_id: JobId,
+    pub state: JobStatus,
+    pub progress: f32,
+    pub metrics: JobMetrics,
+    pub error: Option<String>,
+    pub outputs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct JobMetrics {
+    pub total_tasks: usize,
+    pub completed_tasks: usize,
+    pub failed_tasks: usize,
+    pub pending_tasks: usize,
+    #[serde(default)]
+    pub stages: Vec<StageMetrics>,
+    #[serde(default)]
+    pub workers: Vec<WorkerAggregate>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct StageMetrics {
+    pub stage_id: StageId,
+    pub tasks_total: usize,
+    pub tasks_completed: usize,
+    pub tasks_failed: usize,
+    pub duration_ms: u128,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WorkerAggregate {
+    pub worker_id: WorkerId,
+    pub tasks_completed: usize,
+    pub tasks_failed: usize,
+    pub records_processed: usize,
+    pub cpu_time_ms: u128,
+    pub wall_time_ms: u128,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

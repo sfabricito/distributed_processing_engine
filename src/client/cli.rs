@@ -117,6 +117,15 @@ async fn get_status(master_url: &str, job_id: &str) -> Result<JobStatus> {
         .get("status")
         .and_then(|s| serde_json::from_value(s.clone()).ok())
         .ok_or_else(|| anyhow::anyhow!("missing status in response"))?;
+    let progress = payload
+        .get("progress")
+        .and_then(|p| p.as_f64())
+        .unwrap_or(0.0);
+    let metrics = payload.get("metrics").cloned().unwrap_or_default();
+    println!("status: {:?}, progress: {:.1}%", status, progress);
+    if metrics != serde_json::Value::Null {
+        println!("metrics: {}", metrics);
+    }
     Ok(status)
 }
 

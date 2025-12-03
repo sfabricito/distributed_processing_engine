@@ -33,10 +33,7 @@ pub async fn job_status(
 ) -> Result<Json<JobStatusResponse>, ApiError> {
     let parsed = parse_job_id(&job_id)?;
     let status = state.master.get_job_status(parsed)?;
-    Ok(Json(JobStatusResponse {
-        job_id: parsed,
-        status,
-    }))
+    Ok(Json(status))
 }
 
 pub async fn job_results(
@@ -85,6 +82,10 @@ pub struct JobSubmitResponse {
 pub struct JobStatusResponse {
     pub job_id: JobId,
     pub status: JobStatus,
+    pub progress: f32,
+    pub metrics: crate::common::types::JobMetrics,
+    pub error: Option<String>,
+    pub outputs: Vec<String>,
 }
 
 #[derive(Debug, serde::Serialize)]

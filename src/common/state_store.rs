@@ -38,6 +38,27 @@ impl StateStore {
                 result_json TEXT,
                 FOREIGN KEY (job_id) REFERENCES jobs(job_id)
             );
+            CREATE TABLE IF NOT EXISTS job_status (
+                job_id TEXT PRIMARY KEY,
+                state TEXT NOT NULL,
+                progress REAL NOT NULL,
+                metrics_json TEXT,
+                error TEXT,
+                outputs_json TEXT
+            );
+            CREATE TABLE IF NOT EXISTS stage_status (
+                job_id TEXT NOT NULL,
+                stage_id INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                metrics_json TEXT,
+                PRIMARY KEY (job_id, stage_id)
+            );
+            CREATE TABLE IF NOT EXISTS worker_metrics (
+                worker_id TEXT PRIMARY KEY,
+                last_heartbeat INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                metrics_json TEXT
+            );
             COMMIT;",
         )
         .expect("failed to create state tables");
@@ -63,6 +84,84 @@ impl StateStore {
             "INSERT INTO jobs (job_id, status, dag_json) VALUES (?1, ?2, ?3)
              ON CONFLICT(job_id) DO UPDATE SET status=excluded.status, dag_json=excluded.dag_json;",
             params![job_id.to_string(), status_json, dag_json],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn persist_job_status(
+        &self,
+        job_id: JobId,
+        state: JobStatus,
+        progress: f32,
+        metrics: &crate::common::types::JobMetrics,
+        error: Option<String>,
+        outputs: &[String],
+    ) -> Result<()> {
+        let metrics_json = serde_json::to_string(metrics)?;
+        let outputs_json = serde_json::to_string(outputs)?;
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT INTO job_status (job_id, state, progress, metrics_json, error, outputs_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(job_id) DO UPDATE SET state=excluded.state, progress=excluded.progress, metrics_json=excluded.metrics_json, error=excluded.error, outputs_json=excluded.outputs_json;",
+            params![
+                job_id.to_string(),
+                serde_json::to_string(&state)?,
+                progress as f64,
+                metrics_json,
+                error.unwrap_or_default(),
+                outputs_json
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn persist_stage_status(
+        &self,
+        job_id: JobId,
+        stage_id: u64,
+        status: JobStatus,
+        metrics: &crate::common::types::StageMetrics,
+    ) -> Result<()> {
+        let metrics_json = serde_json::to_string(metrics)?;
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT INTO stage_status (job_id, stage_id, status, metrics_json)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(job_id, stage_id) DO UPDATE SET status=excluded.status, metrics_json=excluded.metrics_json;",
+            params![
+                job_id.to_string(),
+                stage_id as i64,
+                serde_json::to_string(&status)?,
+                metrics_json
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn persist_worker_metrics(
+        &self,
+        worker_id: uuid::Uuid,
+        status: crate::common::types::WorkerStatus,
+        metrics: &crate::common::types::WorkerMetrics,
+    ) -> Result<()> {
+        let metrics_json = serde_json::to_string(metrics)?;
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT INTO worker_metrics (worker_id, last_heartbeat, status, metrics_json)
+             VALUES (?1, strftime('%s','now'), ?2, ?3)
+             ON CONFLICT(worker_id) DO UPDATE SET last_heartbeat=strftime('%s','now'), status=excluded.status, metrics_json=excluded.metrics_json;",
+            params![
+                worker_id.to_string(),
+                serde_json::to_string(&status)?,
+                metrics_json
+            ],
         )?;
         tx.commit()?;
         Ok(())

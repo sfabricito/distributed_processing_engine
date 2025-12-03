@@ -54,6 +54,7 @@ impl Worker {
             self.listen_addr.clone(),
             self.master_addr.clone(),
             self.config.heartbeat_interval_ms,
+            self.executor.clone(),
         );
 
         self.spawn_task_api().await?;
