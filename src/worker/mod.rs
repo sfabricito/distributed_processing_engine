@@ -20,6 +20,7 @@ pub struct Worker {
     pub config: Config,
     pub master_addr: String,
     pub listen_addr: String,
+    pub advertise_addr: String,
     executor: Arc<executor::Executor>,
 }
 
@@ -30,12 +31,18 @@ impl Worker {
             .unwrap_or_else(Uuid::new_v4);
         let listen_addr = format!(
             "{}:{}",
-            config.master_host,
+            config.worker_bind_host,
+            port.unwrap_or(config.worker_base_port)
+        );
+        let advertise_addr = format!(
+            "{}:{}",
+            config.worker_advertise_host,
             port.unwrap_or(config.worker_base_port)
         );
         Self {
             id: worker_id,
             listen_addr,
+            advertise_addr,
             master_addr: config.master_addr(),
             executor: Arc::new(executor::Executor::new(
                 config.clone(),
@@ -67,7 +74,7 @@ impl Worker {
         let url = format!("http://{}/api/v1/register", self.master_addr);
         let payload = WorkerInfo {
             id: self.id,
-            address: self.listen_addr.clone(),
+            address: self.advertise_addr.clone(),
             status: WorkerStatus::Active,
             last_heartbeat: std::time::SystemTime::now(),
             metrics: WorkerMetrics::default(),

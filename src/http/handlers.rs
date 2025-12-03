@@ -1,11 +1,13 @@
 use std::sync::Arc;
 
 use axum::{
+    body::Body,
     extract::{Path, State},
     http::StatusCode,
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     Json,
 };
+use tokio::fs;
 use tracing::warn;
 
 use crate::common::{
@@ -43,6 +45,40 @@ pub async fn job_results(
     let parsed = parse_job_id(&job_id)?;
     let results = state.master.get_job_results(parsed)?;
     Ok(Json(results))
+}
+
+pub async fn job_result_file(
+    State(state): State<ApiState>,
+    Path(job_id): Path<String>,
+) -> Result<Response, ApiError> {
+    let parsed = parse_job_id(&job_id)?;
+    let results = state.master.get_job_results(parsed)?;
+    let path = results
+        .iter()
+        .find(|r| matches!(r.status, crate::common::types::TaskStatus::Completed))
+        .map(|r| r.result_location.path.clone())
+        .ok_or_else(|| ApiError::Engine(EngineError::NotFound("no completed results".into())))?;
+
+    let data = fs::read(&path).await.map_err(|e| {
+        ApiError::Engine(EngineError::Io(format!(
+            "failed to read result file {}: {}",
+            path, e
+        )))
+    })?;
+    let filename = std::path::Path::new(&path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("result.bin");
+    let mut resp = Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/octet-stream")
+        .header(
+            "content-disposition",
+            format!("attachment; filename=\"{}\"", filename),
+        )
+        .body(Body::from(data))
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!(e.to_string())))?;
+    Ok(resp)
 }
 
 pub async fn heartbeat(

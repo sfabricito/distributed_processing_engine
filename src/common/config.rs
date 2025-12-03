@@ -5,6 +5,9 @@ use std::{env, path::PathBuf, str::FromStr};
 pub struct Config {
     pub master_host: String,
     pub master_port: u16,
+    pub worker_host: String,
+    pub worker_bind_host: String,
+    pub worker_advertise_host: String,
     pub worker_base_port: u16,
     pub num_workers: usize,
     pub worker_threads: usize,
@@ -25,6 +28,9 @@ impl Config {
         Ok(Self {
             master_host: env_or("MASTER_HOST", "127.0.0.1".to_string())?,
             master_port: env_or("MASTER_PORT", 8080u16)?,
+            worker_host: env_or("WORKER_HOST", "0.0.0.0".to_string())?,
+            worker_bind_host: env_or("WORKER_BIND_HOST", "0.0.0.0".to_string())?,
+            worker_advertise_host: env_or("WORKER_ADVERTISE_HOST", "127.0.0.1".to_string())?,
             worker_base_port: env_or("WORKER_BASE_PORT", 9100u16)?,
             num_workers: env_or("NUM_WORKERS", 2usize)?,
             worker_threads: env_or("WORKER_THREADS", 4usize)?,
@@ -49,7 +55,7 @@ impl Config {
 
     pub fn worker_listen_addr(&self, worker_index: usize) -> String {
         let port = self.worker_base_port + worker_index as u16;
-        format!("{}:{}", self.master_host, port)
+        format!("{}:{}", self.worker_host, port)
     }
 }
 

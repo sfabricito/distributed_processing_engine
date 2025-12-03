@@ -20,6 +20,10 @@ pub fn register_routes(base_path: &str, master: Arc<Master>) -> Router {
             &format!("{}/jobs/:id/results", base),
             get(handlers::job_results),
         )
+        .route(
+            &format!("{}/jobs/:id/result", base),
+            get(handlers::job_result_file),
+        )
         .route(&format!("{}/heartbeat", base), post(handlers::heartbeat))
         .route(
             &format!("{}/register", base),
