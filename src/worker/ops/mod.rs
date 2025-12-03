@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -9,9 +9,11 @@ use crate::worker::partition::PartitionCache;
 
 pub mod filter;
 pub mod flat_map;
+pub mod join;
 pub mod map;
 pub mod read;
 pub mod reduce;
+pub mod shuffle;
 #[cfg(test)]
 mod tests;
 
@@ -83,18 +85,8 @@ pub enum Operator {
     FlatMap(flat_map::FlatMapOp),
     Reduce(reduce::ReduceOp),
     ReduceByKey(reduce::ReduceByKeyOp),
-    Join(JoinOp),
-    Shuffle(ShuffleOp),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct JoinOp {
-    pub on: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ShuffleOp {
-    pub strategy: String,
+    Join(join::JoinOp),
+    Shuffle(shuffle::ShuffleByKeyOp),
 }
 
 impl Operator {
@@ -117,11 +109,20 @@ impl Operator {
             OperatorType::Map { script } => Operator::Map(map::MapOp { func: script }),
             OperatorType::Filter { predicate } => Operator::Filter(filter::FilterOp { predicate }),
             OperatorType::FlatMap { func } => Operator::FlatMap(flat_map::FlatMapOp { func }),
-            OperatorType::Join { on } => Operator::Join(JoinOp { on }),
+            OperatorType::Join { key, join_type } => {
+                Operator::Join(join::JoinOp { key, join_type })
+            }
             OperatorType::Reduce { reducer } => Operator::Reduce(reduce::ReduceOp { reducer }),
             OperatorType::ReduceByKey { key, op } => {
                 Operator::ReduceByKey(reduce::ReduceByKeyOp { key, reducer: op })
             }
+            OperatorType::ShuffleByKey {
+                key,
+                total_partitions,
+            } => Operator::Shuffle(shuffle::ShuffleByKeyOp {
+                key,
+                total_partitions: total_partitions.max(1),
+            }),
             OperatorType::Aggregate { aggregation } => Operator::Reduce(reduce::ReduceOp {
                 reducer: aggregation,
             }),
@@ -162,20 +163,5 @@ impl Operator {
             Operator::Join(op) => op.execute(input),
             Operator::Shuffle(op) => op.execute(input),
         }
-    }
-}
-
-impl ExecutableOp for JoinOp {
-    fn execute(&self, _partitions: Vec<PartitionData>) -> OpResult {
-        Err(anyhow!("JoinOp not implemented yet (on={})", self.on))
-    }
-}
-
-impl ExecutableOp for ShuffleOp {
-    fn execute(&self, _partitions: Vec<PartitionData>) -> OpResult {
-        Err(anyhow!(
-            "ShuffleOp not implemented yet (strategy={})",
-            self.strategy
-        ))
     }
 }

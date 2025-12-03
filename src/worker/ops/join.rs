@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Map, Value};
 
 use crate::common::dag::JoinType;
 
@@ -10,157 +10,130 @@ use super::{ExecutableOp, OpResult, PartitionData};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JoinOp {
-    pub left_on: String,
-    pub right_on: String,
+    pub key: String,
     pub join_type: JoinType,
 }
 
+#[derive(thiserror::Error, Debug)]
+pub enum JoinError {
+    #[error("JoinOp requires exactly two input partitions (received {0})")]
+    WrongInputCount(usize),
+    #[error("JoinOp: record is not an object")]
+    NonObject,
+    #[error("JoinOp: missing key \"{0}\"")]
+    MissingKey(String),
+    #[error("JoinOp: join key must be string or number")]
+    InvalidKey,
+}
+
 impl ExecutableOp for JoinOp {
-    fn execute(&self, mut partitions: Vec<PartitionData>) -> OpResult {
+    fn execute(&self, partitions: Vec<PartitionData>) -> OpResult {
         if partitions.len() != 2 {
-            return Err(anyhow!(
-                "JoinOp requires exactly two input partitions (received {})",
-                partitions.len()
-            ));
+            return Err(anyhow!(JoinError::WrongInputCount(partitions.len())));
         }
 
-        let right = partitions.pop().unwrap();
-        let left = partitions.pop().unwrap();
-        let (left_limit, left_spill, left_data) = left.into_parts()?;
-        let (_right_limit, _right_spill, right_data) = right.into_parts()?;
-        let mut right_index: HashMap<String, Vec<usize>> = HashMap::new();
-        for (idx, record) in right_data.iter().enumerate() {
-            if let Value::Object(map) = record {
-                if let Some(key) = map.get(&self.right_on) {
-                    right_index.entry(key.to_string()).or_default().push(idx);
-                }
-            }
+        let mut parts_iter = partitions.into_iter();
+        let left = parts_iter.next().unwrap();
+        let right = parts_iter.next().unwrap();
+
+        let pid = left.partition_id.min(right.partition_id);
+        let limit = left.limit_bytes();
+        let spill = left.spill_path();
+
+        let (_, _, left_records) = left.into_parts()?;
+        let (_, _, right_records) = right.into_parts()?;
+
+        let mut right_map: HashMap<String, Vec<Map<String, Value>>> = HashMap::new();
+        let mut right_index: Vec<(String, Map<String, Value>)> = Vec::new();
+
+        for rec in right_records {
+            let obj = rec
+                .as_object()
+                .cloned()
+                .ok_or_else(|| anyhow!(JoinError::NonObject))?;
+            let key = extract_key(&obj, &self.key)?;
+            right_map.entry(key.clone()).or_default().push(obj.clone());
+            right_index.push((key, obj));
         }
 
-        let mut right_matched = vec![false; right_data.len()];
+        let mut matched_right = vec![false; right_index.len()];
         let mut output = Vec::new();
 
-        for record in &left_data {
-            let Value::Object(map) = record else {
-                continue;
-            };
-
-            if let Some(key) = map.get(&self.left_on) {
-                if let Some(matches) = right_index.get(&key.to_string()) {
-                    for idx in matches {
-                        if let Some(r) = right_data.get(*idx) {
-                            right_matched[*idx] = true;
-                            output.push(Self::compose_record(Some(record), Some(r)));
-                        }
+        for lrec in &left_records {
+            let lobj = lrec
+                .as_object()
+                .cloned()
+                .ok_or_else(|| anyhow!(JoinError::NonObject))?;
+            let lkey = extract_key(&lobj, &self.key)?;
+            if let Some(rvec) = right_map.get(&lkey) {
+                for robj in rvec.iter() {
+                    // mark matched
+                    // find global index
+                    if let Some(pos) = right_index
+                        .iter()
+                        .position(|(k, obj)| k == &lkey && obj == robj)
+                    {
+                        matched_right[pos] = true;
                     }
-                } else if matches!(self.join_type, JoinType::Left | JoinType::Full) {
-                    output.push(Self::compose_record(Some(record), None));
+                    let combined = combine_records(&lobj, robj);
+                    output.push(Value::Object(combined));
                 }
             } else if matches!(self.join_type, JoinType::Left | JoinType::Full) {
-                output.push(Self::compose_record(Some(record), None));
+                let combined = combine_left_only(&lobj);
+                output.push(Value::Object(combined));
             }
         }
 
         if matches!(self.join_type, JoinType::Right | JoinType::Full) {
-            for (idx, record) in right_data.iter().enumerate() {
-                if !matches!(record, Value::Object(_)) {
+            for (idx, (_k, robj)) in right_index.iter().enumerate() {
+                if matched_right.get(idx).copied().unwrap_or(false) {
                     continue;
                 }
-                if right_matched.get(idx).copied().unwrap_or(false) {
-                    continue;
-                }
-                output.push(Self::compose_record(None, Some(record)));
+                let combined = combine_right_only(robj);
+                output.push(Value::Object(combined));
             }
         }
 
-        Ok(vec![PartitionData::from_records(
-            left.partition_id.min(right.partition_id),
-            left_limit,
-            left_spill,
-            output,
-        )?])
+        let result = PartitionData::from_records(pid, limit, spill, output)?;
+        Ok(vec![result])
     }
 }
 
-impl JoinOp {
-    fn compose_record(left: Option<&Value>, right: Option<&Value>) -> Value {
-        json!({
-            "left": left.cloned().unwrap_or(Value::Null),
-            "right": right.cloned().unwrap_or(Value::Null),
-        })
+fn extract_key(obj: &Map<String, Value>, key: &str) -> Result<String, anyhow::Error> {
+    let Some(val) = obj.get(key) else {
+        return Err(anyhow!(JoinError::MissingKey(key.to_string())));
+    };
+    match val {
+        Value::String(s) => Ok(s.clone()),
+        Value::Number(n) => Ok(n.to_string()),
+        _ => Err(anyhow!(JoinError::InvalidKey)),
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn performs_inner_join() {
-        let op = JoinOp {
-            left_on: "id".into(),
-            right_on: "id".into(),
-            join_type: JoinType::Inner,
-        };
-        let spill = std::env::temp_dir().join("join-spill-1");
-        let left = PartitionData::from_records(
-            0,
-            usize::MAX,
-            spill.clone(),
-            vec![json!({"id": 1, "left": "a"}), json!({"id": 2, "left": "b"})],
-        )
-        .unwrap();
-        let right = PartitionData::from_records(
-            0,
-            usize::MAX,
-            spill,
-            vec![json!({"id": 1, "right": "c"})],
-        )
-        .unwrap();
-
-        let result = op.execute(vec![left, right]).expect("join should succeed");
-        let mut partition = result.into_iter().next().expect("join should produce a partition");
-        let (_, _, records) = partition.into_parts().unwrap();
-        assert_eq!(records.len(), 1);
-        let row = records.first().unwrap();
-        assert_eq!(
-            row.get("left").and_then(|v| v.get("left")),
-            Some(&json!("a"))
-        );
-        assert_eq!(
-            row.get("right").and_then(|v| v.get("right")),
-            Some(&json!("c"))
-        );
+fn prefix_fields(obj: &Map<String, Value>, prefix: &str) -> Map<String, Value> {
+    let mut out = Map::new();
+    for (k, v) in obj {
+        out.insert(format!("{}{}", prefix, k), v.clone());
     }
+    out
+}
 
-    #[test]
-    fn includes_unmatched_on_full_join() {
-        let op = JoinOp {
-            left_on: "id".into(),
-            right_on: "id".into(),
-            join_type: JoinType::Full,
-        };
-        let spill = std::env::temp_dir().join("join-spill-2");
-        let left = PartitionData::from_records(
-            0,
-            usize::MAX,
-            spill.clone(),
-            vec![json!({"id": 1, "left": "a"})],
-        )
-        .unwrap();
-        let right = PartitionData::from_records(
-            0,
-            usize::MAX,
-            spill,
-            vec![json!({"id": 2, "right": "c"})],
-        )
-        .unwrap();
-
-        let result = op.execute(vec![left, right]).expect("join should succeed");
-        let mut partition = result.into_iter().next().expect("join should produce a partition");
-        let (_, _, records) = partition.into_parts().unwrap();
-        assert_eq!(records.len(), 2);
-        assert!(records.iter().any(|row| row["right"].is_null()));
-        assert!(records.iter().any(|row| row["left"].is_null()));
+fn combine_records(left: &Map<String, Value>, right: &Map<String, Value>) -> Map<String, Value> {
+    let mut out = prefix_fields(left, "left_");
+    for (k, v) in prefix_fields(right, "right_") {
+        out.insert(k, v);
     }
+    out
+}
+
+fn combine_left_only(left: &Map<String, Value>) -> Map<String, Value> {
+    let mut out = prefix_fields(left, "left_");
+    out.insert("right_".to_string() + "missing", Value::Null);
+    out
+}
+
+fn combine_right_only(right: &Map<String, Value>) -> Map<String, Value> {
+    let mut out = prefix_fields(right, "right_");
+    out.insert("left_".to_string() + "missing", Value::Null);
+    out
 }

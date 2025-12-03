@@ -1,18 +1,51 @@
+use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 
 use super::types::{JobId, PartitionId, StageId, Task};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum OperatorType {
-    Read { uri: String, format: String },
-    Map { script: String },
-    Filter { predicate: String },
-    Reduce { reducer: String },
-    ReduceByKey { key: String, op: String },
-    FlatMap { func: String },
-    Join { on: String },
-    Aggregate { aggregation: String },
+    Read {
+        uri: String,
+        format: String,
+    },
+    Map {
+        script: String,
+    },
+    Filter {
+        predicate: String,
+    },
+    Reduce {
+        reducer: String,
+    },
+    ReduceByKey {
+        key: String,
+        #[serde(alias = "reducer")]
+        op: String,
+    },
+    FlatMap {
+        func: String,
+    },
+    Join {
+        key: String,
+        join_type: JoinType,
+    },
+    ShuffleByKey {
+        key: String,
+        total_partitions: usize,
+    },
+    Aggregate {
+        aggregation: String,
+    },
     Identity,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum JoinType {
+    Inner,
+    Left,
+    Right,
+    Full,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,6 +75,23 @@ pub struct Stage {
 }
 
 impl DagSpecification {
+    /// Basic DAG validation: ensure join nodes have exactly two incoming edges.
+    pub fn validate(&self) -> Result<()> {
+        for node in &self.nodes {
+            if let OperatorType::Join { .. } = &node.operator {
+                let incoming = self.edges.iter().filter(|e| e.to == node.id).count();
+                if incoming != 2 {
+                    return Err(anyhow!(
+                        "join node '{}' must have exactly 2 parents (found {})",
+                        node.id,
+                        incoming
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Naive stage splitter: each node is treated as an independent stage ordered by insertion.
     pub fn to_stages(&self) -> Vec<Stage> {
         self.ordered_nodes()
@@ -60,7 +110,7 @@ impl DagSpecification {
         let Some((input_uri, input_format)) = self.read_source() else {
             return Vec::new();
         };
-        let ordered_nodes = self.ordered_nodes();
+        let ordered_nodes = self.inject_local_shuffle(self.ordered_nodes());
         let operators: Vec<OperatorType> = ordered_nodes
             .iter()
             .map(|node| node.operator.clone())
@@ -103,6 +153,35 @@ impl DagSpecification {
             });
         }
         tasks
+    }
+
+    fn inject_local_shuffle(&self, nodes: Vec<DagNode>) -> Vec<DagNode> {
+        let mut out = Vec::new();
+        for node in nodes {
+            if let OperatorType::ReduceByKey { key, op: _ } = &node.operator {
+                let has_shuffle_before = out
+                    .last()
+                    .map(|n: &DagNode| match &n.operator {
+                        OperatorType::ShuffleByKey { key: k, .. } => k == key,
+                        _ => false,
+                    })
+                    .unwrap_or(false);
+                if !has_shuffle_before {
+                    let shuffle_id = format!("__shuffle_{}__", node.id);
+                    out.push(DagNode {
+                        id: shuffle_id,
+                        operator: OperatorType::ShuffleByKey {
+                            key: key.clone(),
+                            total_partitions: self.partitions,
+                        },
+                    });
+                }
+                out.push(node);
+            } else {
+                out.push(node);
+            }
+        }
+        out
     }
 
     fn ordered_nodes(&self) -> Vec<DagNode> {

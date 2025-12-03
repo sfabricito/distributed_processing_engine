@@ -135,6 +135,7 @@ impl Master {
     }
 
     pub async fn submit_job(&self, dag: DagSpecification) -> Result<JobId> {
+        dag.validate()?;
         let job_id = Uuid::new_v4();
         let tasks = dag.materialize_tasks(job_id);
 

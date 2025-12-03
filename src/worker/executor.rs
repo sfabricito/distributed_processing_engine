@@ -244,17 +244,41 @@ impl Executor {
         let incoming_edges_for_trace = incoming_edges.clone();
         let job_for_trace = job_id;
         let pipeline = move || -> anyhow::Result<(Vec<ops::PartitionData>, ExecutionTrace)> {
-            let mut partitions = vec![ops::PartitionData::empty(
-                partition_id,
-                cache_limit,
-                spill_path.clone(),
-            )];
+            use std::collections::HashMap;
+            let mut results: HashMap<String, Vec<ops::PartitionData>> = HashMap::new();
             let mut trace = ExecutionTrace {
                 job_id: job_for_trace.to_string(),
                 stages: Vec::new(),
             };
 
             for (idx, op) in operators.into_iter().enumerate() {
+                let op_id = op_ids_for_trace
+                    .get(idx)
+                    .cloned()
+                    .unwrap_or_else(|| format!("op-{idx}"));
+                let parents: Vec<String> = incoming_edges_for_trace
+                    .get(idx)
+                    .cloned()
+                    .unwrap_or_default()
+                    .iter()
+                    .filter_map(|e| e.split("->").next().map(|s| s.to_string()))
+                    .collect();
+
+                let mut partitions = Vec::new();
+                if parents.is_empty() {
+                    partitions.push(ops::PartitionData::empty(
+                        partition_id,
+                        cache_limit,
+                        spill_path.clone(),
+                    ));
+                } else {
+                    for p in parents {
+                        if let Some(res) = results.remove(&p) {
+                            partitions.extend(res);
+                        }
+                    }
+                }
+
                 let total_records: usize = partitions.iter().map(|p| p.record_count()).sum();
                 let op_name = op.name();
                 info!(
@@ -265,13 +289,10 @@ impl Executor {
                     records = total_records,
                     "starting operator"
                 );
-                partitions = op.execute(partitions)?;
+                let partitions = op.execute(partitions)?;
                 let stage_trace = StageTrace {
                     stage_id: idx,
-                    operator_id: op_ids_for_trace
-                        .get(idx)
-                        .cloned()
-                        .unwrap_or_else(|| op.name().to_string()),
+                    operator_id: op_id.clone(),
                     incoming_edges: incoming_edges_for_trace
                         .get(idx)
                         .cloned()
@@ -295,9 +316,17 @@ impl Executor {
                     records = total_records,
                     "completed operator"
                 );
+                results.insert(op_id, partitions);
             }
 
-            Ok((partitions, trace))
+            let final_key = op_ids_for_trace
+                .last()
+                .cloned()
+                .unwrap_or_else(|| "final".into());
+            let final_parts = results
+                .remove(&final_key)
+                .ok_or_else(|| anyhow::anyhow!("missing final operator output"))?;
+            Ok((final_parts, trace))
         };
 
         let result_data = panic::catch_unwind(AssertUnwindSafe(pipeline));
