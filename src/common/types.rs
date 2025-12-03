@@ -67,6 +67,8 @@ pub struct Task {
     pub stage_id: StageId,
     pub attempt: u32,
     pub operator: crate::common::dag::OperatorType,
+    #[serde(default)]
+    pub operators: Vec<crate::common::dag::OperatorType>,
     pub partition: PartitionId,
     pub input_uri: String,
     pub input_format: String,

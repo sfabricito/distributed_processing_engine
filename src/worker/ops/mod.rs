@@ -27,10 +27,10 @@ impl PartitionData {
     }
 }
 
-pub type OpResult = Result<PartitionData>;
+pub type OpResult<T = Vec<PartitionData>> = Result<T>;
 
 pub trait ExecutableOp: Send + Sync {
-    fn execute(&self, partition: PartitionData) -> OpResult;
+    fn execute(&self, partitions: Vec<PartitionData>) -> OpResult;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,12 +74,24 @@ impl TryFrom<OperatorType> for Operator {
     type Error = anyhow::Error;
 
     fn try_from(value: OperatorType) -> Result<Self, Self::Error> {
+        let op = Self::from_type(value, 0, 1)?;
+
+        Ok(op)
+    }
+}
+
+impl Operator {
+    pub fn from_type(
+        value: OperatorType,
+        partition_id: usize,
+        total_partitions: usize,
+    ) -> Result<Self, anyhow::Error> {
         let op = match value {
             OperatorType::Read { uri, format } => Operator::Read(read::ReadOp {
                 path: uri,
                 format,
-                partition_id: 0,
-                total_partitions: 1,
+                partition_id,
+                total_partitions: total_partitions.max(1),
             }),
             OperatorType::Map { script } => Operator::Map(map::MapOp { func: script }),
             OperatorType::Filter { predicate } => Operator::Filter(filter::FilterOp { predicate }),
@@ -95,9 +107,7 @@ impl TryFrom<OperatorType> for Operator {
 
         Ok(op)
     }
-}
 
-impl Operator {
     pub fn name(&self) -> &'static str {
         match self {
             Operator::Read(_) => "read",
@@ -111,7 +121,7 @@ impl Operator {
         }
     }
 
-    pub fn execute(&self, input: PartitionData) -> OpResult {
+    pub fn execute(&self, input: Vec<PartitionData>) -> OpResult {
         match self {
             Operator::Read(op) => op.execute(input),
             Operator::Map(op) => op.execute(input),
@@ -126,7 +136,7 @@ impl Operator {
 }
 
 impl ExecutableOp for FlatMapOp {
-    fn execute(&self, _partition: PartitionData) -> OpResult {
+    fn execute(&self, _partitions: Vec<PartitionData>) -> OpResult {
         Err(anyhow!(
             "FlatMapOp not implemented yet (func={})",
             self.func
@@ -135,7 +145,7 @@ impl ExecutableOp for FlatMapOp {
 }
 
 impl ExecutableOp for ReduceOp {
-    fn execute(&self, _partition: PartitionData) -> OpResult {
+    fn execute(&self, _partitions: Vec<PartitionData>) -> OpResult {
         Err(anyhow!(
             "ReduceOp not implemented yet (reducer={})",
             self.reducer
@@ -144,7 +154,7 @@ impl ExecutableOp for ReduceOp {
 }
 
 impl ExecutableOp for ReduceByKeyOp {
-    fn execute(&self, _partition: PartitionData) -> OpResult {
+    fn execute(&self, _partitions: Vec<PartitionData>) -> OpResult {
         Err(anyhow!(
             "ReduceByKeyOp not implemented yet (reducer={})",
             self.reducer
@@ -153,13 +163,13 @@ impl ExecutableOp for ReduceByKeyOp {
 }
 
 impl ExecutableOp for JoinOp {
-    fn execute(&self, _partition: PartitionData) -> OpResult {
+    fn execute(&self, _partitions: Vec<PartitionData>) -> OpResult {
         Err(anyhow!("JoinOp not implemented yet (on={})", self.on))
     }
 }
 
 impl ExecutableOp for ShuffleOp {
-    fn execute(&self, _partition: PartitionData) -> OpResult {
+    fn execute(&self, _partitions: Vec<PartitionData>) -> OpResult {
         Err(anyhow!(
             "ShuffleOp not implemented yet (strategy={})",
             self.strategy

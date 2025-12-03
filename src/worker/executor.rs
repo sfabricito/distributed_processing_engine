@@ -10,7 +10,7 @@ use crate::common::{
     config::Config,
     types::{ResultLocation, Task, TaskMetrics, TaskResult, TaskStatus},
 };
-use crate::worker::ops::{self, ExecutableOp};
+use crate::worker::ops;
 
 use super::partition::PartitionStore;
 
@@ -82,9 +82,17 @@ impl Executor {
     async fn execute_once(&self, task: Task) -> TaskResult {
         let task_id = task.task_id;
         let job_id = task.job_id;
-        let stage_id = task.stage_id;
+        let stage_id = task
+            .operators
+            .last()
+            .map(|_| task.operators.len().saturating_sub(1) as u64)
+            .unwrap_or(task.stage_id);
         let partition = task.partition;
-        let operator_def = task.operator.clone();
+        let operator_def = task
+            .operators
+            .last()
+            .cloned()
+            .unwrap_or_else(|| task.operator.clone());
         let failure_path = self.store.partition_path(job_id, stage_id, partition);
 
         let store = self.store.clone();
@@ -118,50 +126,90 @@ impl Executor {
         let total_partitions = task.total_partitions.max(1) as usize;
         let task_id = task.task_id;
         let job_id = task.job_id;
-        let stage_id = task.stage_id;
         let partition = task.partition;
-        let operator_def = task.operator.clone();
 
-        let read_op = ops::read::ReadOp::new(
-            task.input_uri.clone(),
-            task.input_format.clone(),
-            partition_id,
-            total_partitions,
-        );
-        let operator = ops::Operator::try_from(operator_def.clone())
-            .unwrap_or_else(|_| ops::Operator::Read(read_op.clone()));
-        let operator_name = operator.name().to_string();
+        let operator_defs = if task.operators.is_empty() {
+            vec![task.operator.clone()]
+        } else {
+            task.operators.clone()
+        };
+        let final_stage_id = operator_defs.len().saturating_sub(1) as u64;
+        let reported_operator = operator_defs
+            .last()
+            .cloned()
+            .unwrap_or_else(|| task.operator.clone());
 
-        let pipeline = move || -> anyhow::Result<ops::PartitionData> {
-            let base = read_op.execute(ops::PartitionData::empty(partition_id))?;
-            let data = match &operator {
-                ops::Operator::Read(op) => op.execute(base)?,
-                ops::Operator::Map(op) => op.execute(base)?,
-                ops::Operator::Filter(op) => op.execute(base)?,
-                _ => operator.execute(base)?,
-            };
-            Ok(data)
+        let operators: Vec<ops::Operator> = match operator_defs
+            .iter()
+            .map(|op_def| ops::Operator::from_type(op_def.clone(), partition_id, total_partitions))
+            .collect()
+        {
+            Ok(ops) => ops,
+            Err(err) => {
+                let name = format!("{:?}", reported_operator);
+                let path = store.partition_path(job_id, final_stage_id, partition);
+                return Self::failed_result(
+                    task_id,
+                    job_id,
+                    name,
+                    reported_operator,
+                    final_stage_id,
+                    partition,
+                    format!("failed to build operator pipeline: {err}"),
+                    path,
+                    0,
+                );
+            }
+        };
+
+        let operator_name = operators
+            .last()
+            .map(|op| op.name().to_string())
+            .unwrap_or_else(|| "unknown".into());
+
+        let store_for_pipeline = store.clone();
+        let job_for_pipeline = job_id;
+        let pipeline = move || -> anyhow::Result<(Vec<ops::PartitionData>, u64)> {
+            let mut partitions = vec![ops::PartitionData::empty(partition_id)];
+            let mut final_bytes = 0u64;
+            let last_stage_idx = operators.len().saturating_sub(1) as u64;
+
+            for (idx, op) in operators.into_iter().enumerate() {
+                partitions = op.execute(partitions)?;
+                let stage_idx = idx as u64;
+
+                for part in &partitions {
+                    let path = store_for_pipeline.partition_path(
+                        job_for_pipeline,
+                        stage_idx,
+                        part.partition_id as u64,
+                    );
+                    let bytes = store_for_pipeline.write_records(&path, &part.records)?;
+                    if stage_idx == last_stage_idx {
+                        final_bytes += bytes;
+                    }
+                }
+            }
+
+            Ok((partitions, final_bytes))
         };
 
         let result_data = panic::catch_unwind(AssertUnwindSafe(pipeline));
         let duration_ms = start.elapsed().as_millis();
-        let path = store.partition_path(job_id, stage_id, partition);
+        let path = store.partition_path(job_id, final_stage_id, partition);
 
         match result_data {
-            Ok(Ok(partition_data)) => {
-                let processed_records = partition_data.records.len();
-                let size_bytes = store
-                    .write_records(&path, &partition_data.records)
-                    .unwrap_or(0);
+            Ok(Ok((partitions, final_bytes))) => {
+                let processed_records = partitions.iter().map(|p| p.records.len()).sum();
                 TaskResult {
                     task_id,
                     job_id,
-                    operator: operator_def,
-                    stage_id,
+                    operator: reported_operator,
+                    stage_id: final_stage_id,
                     partition,
                     result_location: ResultLocation {
                         path: path.display().to_string(),
-                        size_bytes,
+                        size_bytes: final_bytes,
                     },
                     metrics: TaskMetrics {
                         processed_records,
@@ -177,8 +225,8 @@ impl Executor {
                     task_id,
                     job_id,
                     name,
-                    operator_def.clone(),
-                    stage_id,
+                    reported_operator.clone(),
+                    final_stage_id,
                     partition,
                     message,
                     path,
@@ -192,8 +240,8 @@ impl Executor {
                     task_id,
                     job_id,
                     name,
-                    operator_def.clone(),
-                    stage_id,
+                    reported_operator.clone(),
+                    final_stage_id,
                     partition,
                     message,
                     path,

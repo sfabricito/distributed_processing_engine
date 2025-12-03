@@ -28,7 +28,7 @@ impl ReadOp {
 }
 
 impl ExecutableOp for ReadOp {
-    fn execute(&self, _partition: PartitionData) -> OpResult {
+    fn execute(&self, _partitions: Vec<PartitionData>) -> OpResult {
         let path = Path::new(&self.path);
         let file = File::open(path).with_context(|| format!("opening input {}", self.path))?;
 
@@ -114,10 +114,10 @@ impl ExecutableOp for ReadOp {
             }
         }
 
-        Ok(PartitionData {
+        Ok(vec![PartitionData {
             records,
             partition_id: self.partition_id,
-        })
+        }])
     }
 }
 

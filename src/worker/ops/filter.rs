@@ -85,20 +85,24 @@ pub struct FilterOp {
 }
 
 impl ExecutableOp for FilterOp {
-    fn execute(&self, partition: PartitionData) -> OpResult {
+    fn execute(&self, partitions: Vec<PartitionData>) -> OpResult {
         let predicate = Predicate::parse(&self.predicate).map_err(|e| anyhow::anyhow!(e))?;
 
-        let mut filtered = Vec::with_capacity(partition.records.len());
-        for record in partition.records {
-            if eval_predicate(&record, &predicate) {
-                filtered.push(record);
+        let mut outputs = Vec::with_capacity(partitions.len());
+        for partition in partitions {
+            let mut filtered = Vec::with_capacity(partition.records.len());
+            for record in partition.records {
+                if eval_predicate(&record, &predicate) {
+                    filtered.push(record);
+                }
             }
+            outputs.push(PartitionData {
+                records: filtered,
+                partition_id: partition.partition_id,
+            });
         }
 
-        Ok(PartitionData {
-            records: filtered,
-            partition_id: partition.partition_id,
-        })
+        Ok(outputs)
     }
 }
 

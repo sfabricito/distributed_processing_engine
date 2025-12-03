@@ -42,7 +42,7 @@ pub struct Stage {
 impl DagSpecification {
     /// Naive stage splitter: each node is treated as an independent stage ordered by insertion.
     pub fn to_stages(&self) -> Vec<Stage> {
-        self.nodes
+        self.ordered_nodes()
             .iter()
             .enumerate()
             .map(|(idx, node)| Stage {
@@ -58,29 +58,88 @@ impl DagSpecification {
         let Some((input_uri, input_format)) = self.read_source() else {
             return Vec::new();
         };
-        let mut tasks = Vec::new();
-        for stage in self.to_stages() {
-            for partition in 0..stage.partitions {
-                if let Some(node) = stage.nodes.first() {
-                    // Generate deterministic task IDs so they can be reconstructed after restarts.
-                    let stable_id_input = format!("{}-{}", stage.stage_id, partition);
-                    let task_id = uuid::Uuid::new_v5(&job_id, stable_id_input.as_bytes());
+        let operators: Vec<OperatorType> = self
+            .ordered_nodes()
+            .into_iter()
+            .map(|node| node.operator)
+            .collect();
+        if operators.is_empty() {
+            return Vec::new();
+        }
 
-                    tasks.push(Task {
-                        task_id,
-                        job_id,
-                        stage_id: stage.stage_id,
-                        attempt: 0,
-                        operator: node.operator.clone(),
-                        partition: partition as PartitionId,
-                        input_uri: input_uri.clone(),
-                        input_format: input_format.clone(),
-                        total_partitions: self.partitions as PartitionId,
-                    });
+        let final_stage_id = operators.len().saturating_sub(1) as StageId;
+        let mut tasks = Vec::new();
+        for partition in 0..self.partitions {
+            // Generate deterministic task IDs so they can be reconstructed after restarts.
+            let stable_id_input = format!("{}-{}", final_stage_id, partition);
+            let task_id = uuid::Uuid::new_v5(&job_id, stable_id_input.as_bytes());
+
+            tasks.push(Task {
+                task_id,
+                job_id,
+                stage_id: final_stage_id,
+                attempt: 0,
+                operator: operators.last().cloned().unwrap_or(OperatorType::Identity),
+                operators: operators.clone(),
+                partition: partition as PartitionId,
+                input_uri: input_uri.clone(),
+                input_format: input_format.clone(),
+                total_partitions: self.partitions as PartitionId,
+            });
+        }
+        tasks
+    }
+
+    fn ordered_nodes(&self) -> Vec<DagNode> {
+        use std::collections::{HashMap, VecDeque};
+
+        if self.edges.is_empty() {
+            return self.nodes.clone();
+        }
+
+        let mut incoming: HashMap<String, usize> =
+            self.nodes.iter().map(|n| (n.id.clone(), 0)).collect();
+        let mut outgoing: HashMap<String, Vec<String>> = HashMap::new();
+        for edge in &self.edges {
+            *incoming.entry(edge.to.clone()).or_insert(0) += 1;
+            outgoing
+                .entry(edge.from.clone())
+                .or_default()
+                .push(edge.to.clone());
+        }
+
+        let mut queue = VecDeque::new();
+        for (id, count) in &incoming {
+            if *count == 0 {
+                queue.push_back(id.clone());
+            }
+        }
+
+        let mut ordered_ids = Vec::new();
+        while let Some(id) = queue.pop_front() {
+            ordered_ids.push(id.clone());
+            if let Some(children) = outgoing.get(&id) {
+                for child in children {
+                    if let Some(counter) = incoming.get_mut(child) {
+                        *counter = counter.saturating_sub(1);
+                        if *counter == 0 {
+                            queue.push_back(child.clone());
+                        }
+                    }
                 }
             }
         }
-        tasks
+
+        for node in &self.nodes {
+            if !ordered_ids.iter().any(|id| id == &node.id) {
+                ordered_ids.push(node.id.clone());
+            }
+        }
+
+        ordered_ids
+            .into_iter()
+            .filter_map(|id| self.nodes.iter().find(|n| n.id == id).cloned())
+            .collect()
     }
 
     fn read_source(&self) -> Option<(String, String)> {

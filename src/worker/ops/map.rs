@@ -16,19 +16,25 @@ pub struct MapOp {
 }
 
 impl ExecutableOp for MapOp {
-    fn execute(&self, partition: PartitionData) -> OpResult {
-        let mut mapped = Vec::with_capacity(partition.records.len());
+    fn execute(&self, partitions: Vec<PartitionData>) -> OpResult {
+        let mut outputs = Vec::with_capacity(partitions.len());
 
-        for record in partition.records {
-            let transformed = apply_fn(record, self.func.as_str())?;
+        for partition in partitions {
+            let mut mapped = Vec::with_capacity(partition.records.len());
 
-            mapped.push(transformed);
+            for record in partition.records {
+                let transformed = apply_fn(record, self.func.as_str())?;
+
+                mapped.push(transformed);
+            }
+
+            outputs.push(PartitionData {
+                records: mapped,
+                partition_id: partition.partition_id,
+            });
         }
 
-        Ok(PartitionData {
-            records: mapped,
-            partition_id: partition.partition_id,
-        })
+        Ok(outputs)
     }
 }
 
