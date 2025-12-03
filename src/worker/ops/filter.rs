@@ -89,17 +89,18 @@ impl ExecutableOp for FilterOp {
         let predicate = Predicate::parse(&self.predicate).map_err(|e| anyhow::anyhow!(e))?;
 
         let mut outputs = Vec::with_capacity(partitions.len());
-        for partition in partitions {
-            let mut filtered = Vec::with_capacity(partition.records.len());
-            for record in partition.records {
+        for partition in partitions.into_iter() {
+            let pid = partition.partition_id;
+            let (limit, spill_path, records) = partition.into_parts()?;
+            let mut filtered = Vec::with_capacity(records.len());
+            for record in records {
                 if eval_predicate(&record, &predicate) {
                     filtered.push(record);
                 }
             }
-            outputs.push(PartitionData {
-                records: filtered,
-                partition_id: partition.partition_id,
-            });
+            outputs.push(PartitionData::from_records(
+                pid, limit, spill_path, filtered,
+            )?);
         }
 
         Ok(outputs)

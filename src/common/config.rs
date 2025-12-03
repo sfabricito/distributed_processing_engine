@@ -10,6 +10,7 @@ pub struct Config {
     pub worker_threads: usize,
     pub max_memory_mb: usize,
     pub spill_threshold_mb: usize,
+    pub partition_cache_limit_bytes: usize,
     pub task_timeout_ms: u64,
     pub heartbeat_interval_ms: u64,
     pub max_parallel_tasks: usize,
@@ -29,6 +30,9 @@ impl Config {
             worker_threads: env_or("WORKER_THREADS", 4usize)?,
             max_memory_mb: env_or("MAX_MEMORY_MB", 512usize)?,
             spill_threshold_mb: env_or("SPILL_THRESHOLD_MB", 256usize)?,
+            partition_cache_limit_bytes: env_or("PARTITION_CACHE_LIMIT_MB", 128usize)?
+                * 1024
+                * 1024,
             task_timeout_ms: env_or("TASK_TIMEOUT_MS", 60_000u64)?,
             heartbeat_interval_ms: env_or("HEARTBEAT_INTERVAL_MS", 2_000u64)?,
             max_parallel_tasks: env_or("MAX_PARALLEL_TASKS", 4usize)?,
@@ -74,5 +78,6 @@ mod tests {
         assert_eq!(cfg.heartbeat_interval_ms, 2_000);
         assert_eq!(cfg.max_parallel_tasks, 4);
         assert_eq!(cfg.task_retry_limit, 1);
+        assert_eq!(cfg.partition_cache_limit_bytes, 128 * 1024 * 1024);
     }
 }

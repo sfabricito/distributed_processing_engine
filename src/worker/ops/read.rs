@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Number, Value};
 
 use super::{ExecutableOp, OpResult, PartitionData, Record};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReadOp {
@@ -14,15 +15,26 @@ pub struct ReadOp {
     pub format: String,
     pub partition_id: usize,
     pub total_partitions: usize,
+    pub cache_limit_bytes: usize,
+    pub spill_path: PathBuf,
 }
 
 impl ReadOp {
-    pub fn new(path: String, format: String, partition_id: usize, total_partitions: usize) -> Self {
+    pub fn new(
+        path: String,
+        format: String,
+        partition_id: usize,
+        total_partitions: usize,
+        cache_limit_bytes: usize,
+        spill_path: PathBuf,
+    ) -> Self {
         Self {
             path,
             format,
             partition_id,
             total_partitions: total_partitions.max(1),
+            cache_limit_bytes,
+            spill_path,
         }
     }
 }
@@ -114,10 +126,13 @@ impl ExecutableOp for ReadOp {
             }
         }
 
-        Ok(vec![PartitionData {
+        PartitionData::from_records(
+            self.partition_id,
+            self.cache_limit_bytes,
+            self.spill_path.clone(),
             records,
-            partition_id: self.partition_id,
-        }])
+        )
+        .map(|p| vec![p])
     }
 }
 

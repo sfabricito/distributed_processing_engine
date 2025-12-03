@@ -8,7 +8,10 @@ use tracing::{info, warn};
 
 use crate::common::{
     config::Config,
-    types::{ResultLocation, Task, TaskMetrics, TaskResult, TaskStatus},
+    types::{
+        ExecutionTrace, PartitionInfo, ResultLocation, StageTrace, Task, TaskMetrics, TaskResult,
+        TaskStatus,
+    },
 };
 use crate::worker::ops;
 
@@ -120,13 +123,26 @@ impl Executor {
         }
     }
 
-    fn execute_sync(task: Task, store: Arc<PartitionStore>, _config: Config) -> TaskResult {
+    fn execute_sync(task: Task, store: Arc<PartitionStore>, config: Config) -> TaskResult {
         let start = Instant::now();
         let partition_id = task.partition as usize;
         let total_partitions = task.total_partitions.max(1) as usize;
         let task_id = task.task_id;
         let job_id = task.job_id;
         let partition = task.partition;
+        let cache_limit = config.partition_cache_limit_bytes;
+        let operator_ids = if task.operator_ids.is_empty() {
+            (0..task.operators.len())
+                .map(|idx| format!("op-{idx}"))
+                .collect()
+        } else {
+            task.operator_ids.clone()
+        };
+        let incoming_edges = if task.incoming_edges.is_empty() {
+            vec![Vec::new(); operator_ids.len()]
+        } else {
+            task.incoming_edges.clone()
+        };
 
         let operator_defs = if task.operators.is_empty() {
             vec![task.operator.clone()]
@@ -134,6 +150,7 @@ impl Executor {
             task.operators.clone()
         };
         let final_stage_id = operator_defs.len().saturating_sub(1) as u64;
+        let spill_path = store.spill_path(job_id, final_stage_id, partition);
         let reported_operator = operator_defs
             .last()
             .cloned()
@@ -141,7 +158,15 @@ impl Executor {
 
         let operators: Vec<ops::Operator> = match operator_defs
             .iter()
-            .map(|op_def| ops::Operator::from_type(op_def.clone(), partition_id, total_partitions))
+            .map(|op_def| {
+                ops::Operator::from_type(
+                    op_def.clone(),
+                    partition_id,
+                    total_partitions,
+                    cache_limit,
+                    spill_path.clone(),
+                )
+            })
             .collect()
         {
             Ok(ops) => ops,
@@ -167,31 +192,64 @@ impl Executor {
             .map(|op| op.name().to_string())
             .unwrap_or_else(|| "unknown".into());
 
-        let store_for_pipeline = store.clone();
-        let job_for_pipeline = job_id;
-        let pipeline = move || -> anyhow::Result<(Vec<ops::PartitionData>, u64)> {
-            let mut partitions = vec![ops::PartitionData::empty(partition_id)];
-            let mut final_bytes = 0u64;
-            let last_stage_idx = operators.len().saturating_sub(1) as u64;
+        let op_ids_for_trace = operator_ids.clone();
+        let incoming_edges_for_trace = incoming_edges.clone();
+        let job_for_trace = job_id;
+        let pipeline = move || -> anyhow::Result<(Vec<ops::PartitionData>, ExecutionTrace)> {
+            let mut partitions = vec![ops::PartitionData::empty(
+                partition_id,
+                cache_limit,
+                spill_path.clone(),
+            )];
+            let mut trace = ExecutionTrace {
+                job_id: job_for_trace.to_string(),
+                stages: Vec::new(),
+            };
 
             for (idx, op) in operators.into_iter().enumerate() {
+                let total_records: usize = partitions.iter().map(|p| p.record_count()).sum();
+                let op_name = op.name();
+                info!(
+                    job = %job_for_trace,
+                    stage = idx,
+                    operator = op_name,
+                    partitions = partitions.len(),
+                    records = total_records,
+                    "starting operator"
+                );
                 partitions = op.execute(partitions)?;
-                let stage_idx = idx as u64;
-
-                for part in &partitions {
-                    let path = store_for_pipeline.partition_path(
-                        job_for_pipeline,
-                        stage_idx,
-                        part.partition_id as u64,
-                    );
-                    let bytes = store_for_pipeline.write_records(&path, &part.records)?;
-                    if stage_idx == last_stage_idx {
-                        final_bytes += bytes;
-                    }
-                }
+                let stage_trace = StageTrace {
+                    stage_id: idx,
+                    operator_id: op_ids_for_trace
+                        .get(idx)
+                        .cloned()
+                        .unwrap_or_else(|| op.name().to_string()),
+                    incoming_edges: incoming_edges_for_trace
+                        .get(idx)
+                        .cloned()
+                        .unwrap_or_default(),
+                    output_partitions: partitions
+                        .iter()
+                        .map(|p| PartitionInfo {
+                            partition_id: p.partition_id,
+                            record_count: p.record_count(),
+                            spill_path: p.has_spill().then(|| p.spill_path().display().to_string()),
+                        })
+                        .collect(),
+                };
+                trace.stages.push(stage_trace);
+                let total_records: usize = partitions.iter().map(|p| p.record_count()).sum();
+                info!(
+                    job = %job_for_trace,
+                    stage = idx,
+                    operator = op_name,
+                    partitions = partitions.len(),
+                    records = total_records,
+                    "completed operator"
+                );
             }
 
-            Ok((partitions, final_bytes))
+            Ok((partitions, trace))
         };
 
         let result_data = panic::catch_unwind(AssertUnwindSafe(pipeline));
@@ -199,23 +257,70 @@ impl Executor {
         let path = store.partition_path(job_id, final_stage_id, partition);
 
         match result_data {
-            Ok(Ok((partitions, final_bytes))) => {
-                let processed_records = partitions.iter().map(|p| p.records.len()).sum();
-                TaskResult {
-                    task_id,
-                    job_id,
-                    operator: reported_operator,
-                    stage_id: final_stage_id,
-                    partition,
-                    result_location: ResultLocation {
-                        path: path.display().to_string(),
-                        size_bytes: final_bytes,
-                    },
-                    metrics: TaskMetrics {
-                        processed_records,
-                        duration_ms,
-                    },
-                    status: TaskStatus::Completed,
+            Ok(Ok((partitions, mut trace))) => {
+                let processed_records: usize = partitions.iter().map(|p| p.record_count()).sum();
+                let write_result = (|| -> anyhow::Result<u64> {
+                    let mut final_bytes = 0u64;
+                    let mut final_partitions = Vec::new();
+                    for partition_data in partitions {
+                        let pid = partition_data.partition_id;
+                        let data_path = store.partition_path(job_id, final_stage_id, pid as u64);
+                        let (_, _, records) = partition_data.into_parts()?;
+                        let record_count = records.len();
+                        let bytes = store.write_records(&data_path, &records)?;
+                        final_partitions.push(PartitionInfo {
+                            partition_id: pid,
+                            record_count,
+                            spill_path: None,
+                        });
+                        if pid as u64 == partition {
+                            final_bytes = bytes;
+                        }
+                    }
+                    trace.stages.last_mut().map(|s| {
+                        s.output_partitions = final_partitions.clone();
+                    });
+                    Ok(final_bytes)
+                })();
+
+                match write_result {
+                    Ok(final_bytes) => {
+                        let final_partitions =
+                            trace.stages.last().map(|s| s.output_partitions.clone());
+                        TaskResult {
+                            task_id,
+                            job_id,
+                            operator: reported_operator,
+                            stage_id: final_stage_id,
+                            partition,
+                            result_location: ResultLocation {
+                                path: path.display().to_string(),
+                                size_bytes: final_bytes,
+                            },
+                            metrics: TaskMetrics {
+                                processed_records,
+                                duration_ms,
+                            },
+                            status: TaskStatus::Completed,
+                            trace: Some(trace.clone()),
+                            final_partitions,
+                        }
+                    }
+                    Err(err) => {
+                        let name = operator_name.clone();
+                        let message = format!("operator {name} failed writing output: {err}");
+                        Self::failed_result(
+                            task_id,
+                            job_id,
+                            name,
+                            reported_operator.clone(),
+                            final_stage_id,
+                            partition,
+                            message,
+                            path,
+                            duration_ms,
+                        )
+                    }
                 }
             }
             Ok(Err(err)) => {
@@ -277,6 +382,8 @@ impl Executor {
                 duration_ms,
             },
             status: TaskStatus::Failed(format!("{operator_name}: {error}")),
+            trace: None,
+            final_partitions: None,
         }
     }
 

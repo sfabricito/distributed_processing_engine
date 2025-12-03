@@ -26,8 +26,10 @@ impl ExecutableOp for JoinOp {
 
         let right = partitions.pop().unwrap();
         let left = partitions.pop().unwrap();
+        let (left_limit, left_spill, left_data) = left.into_parts()?;
+        let (_right_limit, _right_spill, right_data) = right.into_parts()?;
         let mut right_index: HashMap<String, Vec<usize>> = HashMap::new();
-        for (idx, record) in right.records.iter().enumerate() {
+        for (idx, record) in right_data.iter().enumerate() {
             if let Value::Object(map) = record {
                 if let Some(key) = map.get(&self.right_on) {
                     right_index.entry(key.to_string()).or_default().push(idx);
@@ -35,10 +37,10 @@ impl ExecutableOp for JoinOp {
             }
         }
 
-        let mut right_matched = vec![false; right.records.len()];
+        let mut right_matched = vec![false; right_data.len()];
         let mut output = Vec::new();
 
-        for record in &left.records {
+        for record in &left_data {
             let Value::Object(map) = record else {
                 continue;
             };
@@ -46,7 +48,7 @@ impl ExecutableOp for JoinOp {
             if let Some(key) = map.get(&self.left_on) {
                 if let Some(matches) = right_index.get(&key.to_string()) {
                     for idx in matches {
-                        if let Some(r) = right.records.get(*idx) {
+                        if let Some(r) = right_data.get(*idx) {
                             right_matched[*idx] = true;
                             output.push(Self::compose_record(Some(record), Some(r)));
                         }
@@ -60,7 +62,7 @@ impl ExecutableOp for JoinOp {
         }
 
         if matches!(self.join_type, JoinType::Right | JoinType::Full) {
-            for (idx, record) in right.records.iter().enumerate() {
+            for (idx, record) in right_data.iter().enumerate() {
                 if !matches!(record, Value::Object(_)) {
                     continue;
                 }
@@ -71,10 +73,12 @@ impl ExecutableOp for JoinOp {
             }
         }
 
-        Ok(vec![PartitionData {
-            records: output,
-            partition_id: left.partition_id.min(right.partition_id),
-        }])
+        Ok(vec![PartitionData::from_records(
+            left.partition_id.min(right.partition_id),
+            left_limit,
+            left_spill,
+            output,
+        )?])
     }
 }
 
@@ -98,19 +102,27 @@ mod tests {
             right_on: "id".into(),
             join_type: JoinType::Inner,
         };
-        let left = PartitionData {
-            partition_id: 0,
-            records: vec![json!({"id": 1, "left": "a"}), json!({"id": 2, "left": "b"})],
-        };
-        let right = PartitionData {
-            partition_id: 0,
-            records: vec![json!({"id": 1, "right": "c"})],
-        };
+        let spill = std::env::temp_dir().join("join-spill-1");
+        let left = PartitionData::from_records(
+            0,
+            usize::MAX,
+            spill.clone(),
+            vec![json!({"id": 1, "left": "a"}), json!({"id": 2, "left": "b"})],
+        )
+        .unwrap();
+        let right = PartitionData::from_records(
+            0,
+            usize::MAX,
+            spill,
+            vec![json!({"id": 1, "right": "c"})],
+        )
+        .unwrap();
 
         let result = op.execute(vec![left, right]).expect("join should succeed");
-        let partition = result.first().expect("join should produce a partition");
-        assert_eq!(partition.records.len(), 1);
-        let row = partition.records.first().unwrap();
+        let mut partition = result.into_iter().next().expect("join should produce a partition");
+        let (_, _, records) = partition.into_parts().unwrap();
+        assert_eq!(records.len(), 1);
+        let row = records.first().unwrap();
         assert_eq!(
             row.get("left").and_then(|v| v.get("left")),
             Some(&json!("a"))
@@ -128,22 +140,27 @@ mod tests {
             right_on: "id".into(),
             join_type: JoinType::Full,
         };
-        let left = PartitionData {
-            partition_id: 0,
-            records: vec![json!({"id": 1, "left": "a"})],
-        };
-        let right = PartitionData {
-            partition_id: 0,
-            records: vec![json!({"id": 2, "right": "c"})],
-        };
+        let spill = std::env::temp_dir().join("join-spill-2");
+        let left = PartitionData::from_records(
+            0,
+            usize::MAX,
+            spill.clone(),
+            vec![json!({"id": 1, "left": "a"})],
+        )
+        .unwrap();
+        let right = PartitionData::from_records(
+            0,
+            usize::MAX,
+            spill,
+            vec![json!({"id": 2, "right": "c"})],
+        )
+        .unwrap();
 
         let result = op.execute(vec![left, right]).expect("join should succeed");
-        let partition = result.first().expect("join should produce a partition");
-        assert_eq!(partition.records.len(), 2);
-        assert!(partition
-            .records
-            .iter()
-            .any(|row| row["right"].is_null()));
-        assert!(partition.records.iter().any(|row| row["left"].is_null()));
+        let mut partition = result.into_iter().next().expect("join should produce a partition");
+        let (_, _, records) = partition.into_parts().unwrap();
+        assert_eq!(records.len(), 2);
+        assert!(records.iter().any(|row| row["right"].is_null()));
+        assert!(records.iter().any(|row| row["left"].is_null()));
     }
 }

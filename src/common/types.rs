@@ -69,6 +69,10 @@ pub struct Task {
     pub operator: crate::common::dag::OperatorType,
     #[serde(default)]
     pub operators: Vec<crate::common::dag::OperatorType>,
+    #[serde(default)]
+    pub operator_ids: Vec<String>,
+    #[serde(default)]
+    pub incoming_edges: Vec<Vec<String>>,
     pub partition: PartitionId,
     pub input_uri: String,
     pub input_format: String,
@@ -85,6 +89,10 @@ pub struct TaskResult {
     pub result_location: ResultLocation,
     pub metrics: TaskMetrics,
     pub status: TaskStatus,
+    #[serde(default)]
+    pub trace: Option<ExecutionTrace>,
+    #[serde(default)]
+    pub final_partitions: Option<Vec<PartitionInfo>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,6 +114,27 @@ impl Default for TaskMetrics {
 pub struct ResultLocation {
     pub path: String,
     pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ExecutionTrace {
+    pub job_id: String,
+    pub stages: Vec<StageTrace>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StageTrace {
+    pub stage_id: usize,
+    pub operator_id: String,
+    pub incoming_edges: Vec<String>,
+    pub output_partitions: Vec<PartitionInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PartitionInfo {
+    pub partition_id: usize,
+    pub record_count: usize,
+    pub spill_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

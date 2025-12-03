@@ -1,10 +1,11 @@
-use std::convert::TryFrom;
+use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::common::dag::OperatorType;
+use crate::worker::partition::PartitionCache;
 
 pub mod filter;
 pub mod map;
@@ -12,18 +13,55 @@ pub mod read;
 
 pub type Record = Value;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct PartitionData {
-    pub records: Vec<Record>,
     pub partition_id: usize,
+    pub cache: PartitionCache,
 }
 
 impl PartitionData {
-    pub fn empty(partition_id: usize) -> Self {
+    pub fn empty(partition_id: usize, limit_bytes: usize, spill_path: PathBuf) -> Self {
         Self {
-            records: Vec::new(),
             partition_id,
+            cache: PartitionCache::new(limit_bytes, spill_path),
         }
+    }
+
+    pub fn from_records(
+        partition_id: usize,
+        limit_bytes: usize,
+        spill_path: PathBuf,
+        records: Vec<Record>,
+    ) -> Result<Self> {
+        let mut cache = PartitionCache::new(limit_bytes, spill_path);
+        cache.push_batch(records)?;
+        Ok(Self {
+            partition_id,
+            cache,
+        })
+    }
+
+    pub fn record_count(&self) -> usize {
+        self.cache.record_count()
+    }
+
+    pub fn limit_bytes(&self) -> usize {
+        self.cache.limit_bytes()
+    }
+
+    pub fn spill_path(&self) -> PathBuf {
+        self.cache.spill_path()
+    }
+
+    pub fn has_spill(&self) -> bool {
+        self.cache.has_spill()
+    }
+
+    pub fn into_parts(mut self) -> Result<(usize, PathBuf, Vec<Record>)> {
+        let limit = self.cache.limit_bytes();
+        let spill_path = self.cache.spill_path();
+        let records = self.cache.drain_all()?;
+        Ok((limit, spill_path, records))
     }
 }
 
@@ -70,21 +108,13 @@ pub struct ShuffleOp {
     pub strategy: String,
 }
 
-impl TryFrom<OperatorType> for Operator {
-    type Error = anyhow::Error;
-
-    fn try_from(value: OperatorType) -> Result<Self, Self::Error> {
-        let op = Self::from_type(value, 0, 1)?;
-
-        Ok(op)
-    }
-}
-
 impl Operator {
     pub fn from_type(
         value: OperatorType,
         partition_id: usize,
         total_partitions: usize,
+        cache_limit_bytes: usize,
+        spill_path: PathBuf,
     ) -> Result<Self, anyhow::Error> {
         let op = match value {
             OperatorType::Read { uri, format } => Operator::Read(read::ReadOp {
@@ -92,6 +122,8 @@ impl Operator {
                 format,
                 partition_id,
                 total_partitions: total_partitions.max(1),
+                cache_limit_bytes,
+                spill_path,
             }),
             OperatorType::Map { script } => Operator::Map(map::MapOp { func: script }),
             OperatorType::Filter { predicate } => Operator::Filter(filter::FilterOp { predicate }),
@@ -106,6 +138,11 @@ impl Operator {
         };
 
         Ok(op)
+    }
+
+    pub fn try_from(value: OperatorType) -> Result<Self, anyhow::Error> {
+        let temp_path = std::env::temp_dir().join("dpe-spill-default.bin");
+        Self::from_type(value, 0, 1, usize::MAX, temp_path)
     }
 
     pub fn name(&self) -> &'static str {

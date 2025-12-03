@@ -58,10 +58,21 @@ impl DagSpecification {
         let Some((input_uri, input_format)) = self.read_source() else {
             return Vec::new();
         };
-        let operators: Vec<OperatorType> = self
-            .ordered_nodes()
-            .into_iter()
-            .map(|node| node.operator)
+        let ordered_nodes = self.ordered_nodes();
+        let operators: Vec<OperatorType> = ordered_nodes
+            .iter()
+            .map(|node| node.operator.clone())
+            .collect();
+        let operator_ids: Vec<String> = ordered_nodes.iter().map(|n| n.id.clone()).collect();
+        let incoming_edges: Vec<Vec<String>> = operator_ids
+            .iter()
+            .map(|id| {
+                self.edges
+                    .iter()
+                    .filter(|edge| &edge.to == id)
+                    .map(|edge| format!("{}->{}", edge.from, edge.to))
+                    .collect()
+            })
             .collect();
         if operators.is_empty() {
             return Vec::new();
@@ -81,6 +92,8 @@ impl DagSpecification {
                 attempt: 0,
                 operator: operators.last().cloned().unwrap_or(OperatorType::Identity),
                 operators: operators.clone(),
+                operator_ids: operator_ids.clone(),
+                incoming_edges: incoming_edges.clone(),
                 partition: partition as PartitionId,
                 input_uri: input_uri.clone(),
                 input_format: input_format.clone(),

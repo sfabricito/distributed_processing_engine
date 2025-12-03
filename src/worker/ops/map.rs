@@ -19,19 +19,18 @@ impl ExecutableOp for MapOp {
     fn execute(&self, partitions: Vec<PartitionData>) -> OpResult {
         let mut outputs = Vec::with_capacity(partitions.len());
 
-        for partition in partitions {
-            let mut mapped = Vec::with_capacity(partition.records.len());
+        for partition in partitions.into_iter() {
+            let pid = partition.partition_id;
+            let (limit, spill_path, records) = partition.into_parts()?;
+            let mut mapped = Vec::with_capacity(records.len());
 
-            for record in partition.records {
+            for record in records {
                 let transformed = apply_fn(record, self.func.as_str())?;
 
                 mapped.push(transformed);
             }
 
-            outputs.push(PartitionData {
-                records: mapped,
-                partition_id: partition.partition_id,
-            });
+            outputs.push(PartitionData::from_records(pid, limit, spill_path, mapped)?);
         }
 
         Ok(outputs)
@@ -44,6 +43,18 @@ fn apply_fn(value: Value, func: &str) -> Result<Value, anyhow::Error> {
             "identity" => Ok(Value::String(s)),
             "uppercase" => Ok(Value::String(s.to_uppercase())),
             "lowercase" => Ok(Value::String(s.to_lowercase())),
+            "double" => {
+                // Best-effort: try to double numeric-looking strings, otherwise leave unchanged.
+                if let Ok(i) = s.parse::<i64>() {
+                    Ok(Value::Number(serde_json::Number::from(i * 2)))
+                } else if let Ok(f) = s.parse::<f64>() {
+                    serde_json::Number::from_f64(f * 2.0)
+                        .map(Value::Number)
+                        .ok_or_else(|| anyhow!("failed to convert doubled float from string"))
+                } else {
+                    Ok(Value::String(s))
+                }
+            }
             _ => Err(anyhow!(MapError::UnknownFunction(func.to_string()))),
         },
         Value::Number(n) => match func {
