@@ -8,6 +8,8 @@ pub enum OperatorType {
     Map { script: String },
     Filter { predicate: String },
     Reduce { reducer: String },
+    ReduceByKey { key: String, op: String },
+    FlatMap { func: String },
     Join { on: String },
     Aggregate { aggregation: String },
     Identity,

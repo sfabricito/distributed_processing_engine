@@ -1,7 +1,5 @@
 use clap::{Parser, Subcommand};
-use distributed_processing_engine::{
-    client, common::config::Config, master::Master, worker::Worker,
-};
+use distributed_processing_engine::{common::config::Config, master::Master, worker::Worker};
 use tracing::info;
 use tracing_subscriber::prelude::*;
 
@@ -20,10 +18,6 @@ enum Command {
         port: Option<u16>,
         #[arg(long)]
         id: Option<String>,
-    },
-    Client {
-        #[command(subcommand)]
-        action: client::cli::ClientCommand,
     },
 }
 
@@ -48,10 +42,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Worker { port, id } => {
             let worker = Worker::new(config.clone(), id, port);
             worker.start().await?;
-        }
-        Command::Client { action } => {
-            client::cli::execute_client(action, &config).await?;
-        }
+        } // Client CLI is provided as a separate binary `mini-spark-cli`.
     }
 
     Ok(())

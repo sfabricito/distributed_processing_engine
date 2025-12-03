@@ -8,8 +8,12 @@ use crate::common::dag::OperatorType;
 use crate::worker::partition::PartitionCache;
 
 pub mod filter;
+pub mod flat_map;
 pub mod map;
 pub mod read;
+pub mod reduce;
+#[cfg(test)]
+mod tests;
 
 pub type Record = Value;
 
@@ -76,26 +80,11 @@ pub enum Operator {
     Read(read::ReadOp),
     Map(map::MapOp),
     Filter(filter::FilterOp),
-    FlatMap(FlatMapOp),
-    Reduce(ReduceOp),
-    ReduceByKey(ReduceByKeyOp),
+    FlatMap(flat_map::FlatMapOp),
+    Reduce(reduce::ReduceOp),
+    ReduceByKey(reduce::ReduceByKeyOp),
     Join(JoinOp),
     Shuffle(ShuffleOp),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct FlatMapOp {
-    pub func: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ReduceOp {
-    pub reducer: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ReduceByKeyOp {
-    pub reducer: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -127,9 +116,13 @@ impl Operator {
             }),
             OperatorType::Map { script } => Operator::Map(map::MapOp { func: script }),
             OperatorType::Filter { predicate } => Operator::Filter(filter::FilterOp { predicate }),
+            OperatorType::FlatMap { func } => Operator::FlatMap(flat_map::FlatMapOp { func }),
             OperatorType::Join { on } => Operator::Join(JoinOp { on }),
-            OperatorType::Reduce { reducer } => Operator::Reduce(ReduceOp { reducer }),
-            OperatorType::Aggregate { aggregation } => Operator::Reduce(ReduceOp {
+            OperatorType::Reduce { reducer } => Operator::Reduce(reduce::ReduceOp { reducer }),
+            OperatorType::ReduceByKey { key, op } => {
+                Operator::ReduceByKey(reduce::ReduceByKeyOp { key, reducer: op })
+            }
+            OperatorType::Aggregate { aggregation } => Operator::Reduce(reduce::ReduceOp {
                 reducer: aggregation,
             }),
             OperatorType::Identity => Operator::Map(map::MapOp {
@@ -169,33 +162,6 @@ impl Operator {
             Operator::Join(op) => op.execute(input),
             Operator::Shuffle(op) => op.execute(input),
         }
-    }
-}
-
-impl ExecutableOp for FlatMapOp {
-    fn execute(&self, _partitions: Vec<PartitionData>) -> OpResult {
-        Err(anyhow!(
-            "FlatMapOp not implemented yet (func={})",
-            self.func
-        ))
-    }
-}
-
-impl ExecutableOp for ReduceOp {
-    fn execute(&self, _partitions: Vec<PartitionData>) -> OpResult {
-        Err(anyhow!(
-            "ReduceOp not implemented yet (reducer={})",
-            self.reducer
-        ))
-    }
-}
-
-impl ExecutableOp for ReduceByKeyOp {
-    fn execute(&self, _partitions: Vec<PartitionData>) -> OpResult {
-        Err(anyhow!(
-            "ReduceByKeyOp not implemented yet (reducer={})",
-            self.reducer
-        ))
     }
 }
 
