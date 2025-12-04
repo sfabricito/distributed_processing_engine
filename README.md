@@ -55,17 +55,21 @@ Jobs are defined through a **Directed Acyclic Graph (DAG)** that specifies opera
 
 ### **Operators Implemented**
 
-The engine provides a set of core operators that enable flexible data transformation and aggregation across partitions. Each operator is executed independently per partition to maximize data parallelism.
+The engine includes a fully functional operator set, enabling both record-level transformations and key-based aggregations. All operators run at the partition level to maximize data parallelism.
 
-* `map` – element-wise transformation
-* `filter` – predicate-based filtering 
-* `flat_map` – expansion into multiple records  
-* `map_flap` – custom flat-map variant 
-* `reduce` – aggregation of partition data
-* `reduce_by_key` – group-by and key-based reduction
-* `read` – ingestion from CSV/JSONL input files
+| Operator | Description |
+|---------|-------------|
+| **read_csv / read_jsonl** | Ingests structured data and splits it into partitions. |
+| **map** | Applies a unary transformation to every record. |
+| **filter** | Keeps only records that satisfy a user-defined predicate. |
+| **flat_map** | Produces zero or more output records per input element, enabling tokenization and record expansion. |
+| **reduce** | Aggregates all elements in a partition using an associative function. |
+| **reduce_by_key** | Groups values by key and performs per-key reduction (shuffle required). |
+| **join** | Performs a key-based join between two datasets, including shuffle and repartitioning. |
+| **write_csv / write_jsonl** | Emits final or intermediate partitions to disk. |
 
-CHANGE
+These operators form the transformation layer of the engine and match the capabilities described in the project’s technical report.
+
     
 ### **Worker Runtime**
 
@@ -80,7 +84,7 @@ Workers handle the actual computation of tasks. Each worker features a **multi-t
 
 The master node is responsible for global orchestration. It manages job lifecycles, assigns tasks to workers, and tracks the execution progress of each stage, ensuring deterministic and reproducible job execution.
 
-* FIFO task queue and global scheduler
+* Round Robin task queue and global scheduler
 * Worker load metrics and selection strategies
 * Persistent job state management
 * DAG parsing, validation, and planning   
@@ -130,38 +134,78 @@ The repository is organized into a modular architecture that cleanly separates c
 
 ````
 distributed_processing_engine/
-├── Cargo.toml
-├── README.md
-├── envExample
-├── src/
-│   ├── main.rs                # Entry point (master/worker launcher)
-│   ├── lib.rs
-│   ├── common/                # Shared utilities and domain types
-│   │   ├── config.rs          # Cluster and node configuration
-│   │   ├── dag.rs             # DAG parsing & node definitions
-│   │   ├── state_store.rs     # Basic persistence for job metadata
-│   │   ├── types.rs           # Core structs (Partition, Job, Task)
-│   ├── http/                  # Lightweight custom HTTP interface
-│   │   ├── server.rs          # Socket listener + HTTP 1.1 handler
-│   │   ├── handlers.rs        # Routes for job submission, status, etc.
-│   │   ├── router.rs          # Request -> handler dispatch
-│   │   ├── request.rs         # HTTP parsing utilities
-│   ├── master/
-│   │   ├── registry.rs        # Worker registration & heartbeats
-│   │   ├── scheduler.rs       # Global task queue + scheduling logic
-│   ├── worker/
-│   │   ├── executor.rs        # Multi-threaded task runner
-│   │   ├── monitor.rs         # Worker self-reporting and health
-│   │   ├── partition.rs       # Partition storage, loading, spill-to-disk
-│   │   └── ops/               # Operator implementations
-│   │       ├── read.rs
-│   │       ├── map.rs
-│   │       ├── filter.rs
-│   │       ├── reduce.rs
-│   │       ├── map_flap.rs
-│   │       └── mod.rs
-└── target/
-
+├── Cargo.toml                 # Project manifest
+├── Cargo.lock                 # Dependency lockfile
+├── Makefile                   # Build shortcuts
+├── Dockerfile                 # Container build instructions
+├── docker-compose.yml         # Multi-node cluster setup
+├── envExample                 # Example environment variables
+├── LICENSE                    # MIT license
+├── README.md                  # Documentation root
+├── scripts/                   # Helper scripts
+│
+└── src/
+    ├── main.rs                # Master / worker launcher
+    ├── lib.rs                 # Crate-level exports
+    │
+    ├── common/                # Shared utilities and domain types
+    │   ├── config.rs          # Config loading + defaults
+    │   ├── dag.rs             # DAG parsing and definitions
+    │   ├── mod.rs
+    │   ├── state_store.rs     # Job/stage persistence
+    │   └── types.rs           # Core structs (Job, Task, Partition)
+    │
+    ├── data/                  # Static data fixtures
+    │
+    ├── http/                  # Lightweight custom HTTP server
+    │   ├── handlers.rs        # /jobs, /status, /workers routes
+    │   ├── mod.rs
+    │   ├── request.rs         # Manual HTTP parsing
+    │   ├── router.rs          # Routing table
+    │   └── server.rs          # TCP listener + dispatcher
+    │
+    ├── logs/                  # Runtime logs (optional)
+    │
+    ├── master/                # Master node runtime
+    │   ├── mod.rs
+    │   ├── registry.rs        # Worker tracking + heartbeats
+    │   └── scheduler.rs       # Task scheduling logic
+    │
+    ├── results/               # Output artifacts
+    │
+    ├── client/                # CLI client interfaces
+    │   ├── commands/
+    │   │   ├── dag.rs         # DAG generation command
+    │   │   ├── metrics.rs     # Metrics query command
+    │   │   └── mod.rs
+    │   ├── status.rs          # Job status polling
+    │   ├── submit.rs          # Job submission logic
+    │   └── workers.rs         # Worker list query
+    │
+    ├── types/                 # Shared API / DTO structs
+    │   ├── job.rs             # Job model types
+    │   ├── metrics.rs         # Metrics structures
+    │   ├── mod.rs
+    │   └── worker.rs          # Worker metadata
+    │
+    └── worker/                # Worker node runtime
+        ├── executor.rs        # Task execution engine
+        ├── lib.rs
+        ├── main.rs            # Worker entrypoint
+        ├── mod.rs
+        ├── monitor.rs         # Heartbeat + health monitoring
+        ├── partition.rs       # Partition storage + spill-to-disk
+        │
+        └── ops/               # Operator implementations
+            ├── filter.rs      # Filtering operator
+            ├── flat_map.rs    # Multi-output expansion
+            ├── join.rs        # Key-based dataset join
+            ├── map.rs         # Element-wise map
+            ├── mod.rs
+            ├── read.rs        # CSV/JSONL ingestion
+            ├── reduce.rs      # Associative reduce
+            ├── shuffle.rs     # Repartition / shuffle logic
+            └── tests.rs       # Unit tests for ops
 ````
 
 Overall, the structure mirrors the architecture of modern data-processing engines: a centralized coordinator, distributed executors, a clear operator layer, and an HTTP entrypoint enabling external control of job execution.
@@ -287,7 +331,7 @@ The **master node** acts as the control plane of the system. It is responsible f
 Internally, the master implements:
 
 * **registry.rs** – Tracks active workers, manages heartbeats, and maintains worker load metrics used for scheduling.
-* **scheduler.rs** – Provides a global FIFO task queue and a load-aware round-robin scheduling policy.
+* **scheduler.rs** – Provides a global Round Robin task queue and a load-aware round-robin scheduling policy.
 * **common/dag.rs** – Parses the user’s JSON DAG, performs dependency analysis, and builds stage execution plans.
 
 The master manages the job lifecycle end-to-end:
@@ -358,15 +402,14 @@ This endpoint enables clients to poll jobs in real time.
 
 ### **GET /jobs/{id}/results — Job Results**
 
-Returns the output generated by the final stage of the DAG.Depending on the operator chain, the response may include:
+Retrieves metadata for the output partitions generated by the final stage.
+The response may include:
 
-* File paths for each partition output
-* A merged output artifact (optional)
-* Metadata such as partition sizes and operator timings
+- Paths to output files (CSV or JSONL)
+- Partition count and sizes
+- Operator that produced the final stage (e.g., `reduce_by_key`, `join`, `write_csv`)
 
-This endpoint allows downstream systems or users to retrieve and consume the final results of the distributed computation.
-
-CHANGE
+This endpoint does not inline the data; it returns file paths for downstream use.
 
 ## **8. Operators**
 
@@ -376,9 +419,16 @@ The engine provides a set of core data-transformation operators that form the fo
 
 The following operators are fully implemented and can be combined to form complex dataflows defined in the user’s DAG:
 
-OperatorDescription**map**Applies a unary function to each element of the partition, producing a transformed partition of equal size.**filter**Retains only the elements that satisfy a user-defined predicate.**flat_map**Expands each input element into zero, one, or many elements, enabling tokenization, decomposition, and other multi-output transformations.**reduce**Aggregates all elements in a partition into a single value using an associative reduction function.**reduce_by_key**Performs key-based grouping and aggregation, distributing intermediate values into buckets before reducing each group.**read**Ingests raw data from CSV or JSONL input files and splits it into partitions for downstream processing.
-
-CHANGE
+| Operator | Description |
+|---------|-------------|
+| `map` | Element-wise transformation. |
+| `filter` | Predicate-based filtering. |
+| `flat_map` | Expands each input into zero or more elements. |
+| `reduce` | Aggregates all partition elements. |
+| `reduce_by_key` | Key-grouped aggregation with shuffle. |
+| `join` | Key-based dataset join (requires repartitioning). |
+| `read_csv` / `read_jsonl` | Ingests input datasets and creates partitions. |
+| `write_csv` / `write_jsonl` | Writes per-partition results to disk. |
 
 These operators are intentionally kept low-level and explicit, providing transparency into how real distributed engines execute transformations internally.
 
@@ -396,7 +446,7 @@ Because operators do not maintain shared state across partitions, this architect
 
 ## **9. Execution Model**
 
-The overall execution model follows a **Batch DAG architecture**, similar to Spark’s RDD transformation pipeline. Jobs are not executed line-by-line; instead, the system analyzes the full DAG, identifies stage boundaries, and processes the data through clearly defined phases.
+The overall execution model follows a **Batch DAG architecture**, similar to Spark’s RDD transformation pipeline. Jobs are not executed line-by-line; instead, the system analyzes the full DAG, identifies stage boundaries, and processes the data through clearly defined phases. It also includes shuffle stages required by key-based workloads such as `reduce_by_key` and `join`. During shuffle, workers redistribute intermediate data so that records sharing the same key are colocated. This introduces stage boundaries and ensures determinism for grouping and join operations.
 
 ### **Batch DAG**
 
@@ -410,8 +460,6 @@ Distributed execution follows these steps:
 6. **Collect output** – Partition results are written to disk and returned via the API.
     
 This staged execution ensures determinism, fault isolation, and efficient distribution of work through the cluster.
-
-CHECK
 
 ### **Partition Model**
 
@@ -429,15 +477,12 @@ Observability is essential in distributed systems, where failures, delays, and l
 
 The system tracks and exposes:
 
-* **Worker load:** Number of active tasks, CPU usage (approx), and outstanding queue depth
+* **Worker load:** Number of active tasks, CPU usage (approx), and outstanding queue length
 * **Task attempt count:** Number of retries, failed executions, and overall task stability
 * **Partition sizes:** Memory footprint and spill behavior for large datasets
-* **Operator duration per stage:** Execution time for each operator on per-partition and per-stage granularity
 * **Job-level state tracking:** High-level progress, completed stages, and final job status
 * **Structured logs:** Detailed logs emitted by each node (master and workers) for debugging and auditing
 
-CHECK
-    
 These metrics allow users to measure performance, and verify the correctness of distributed execution. They also form the foundation for future enhancements such as autoscaling or adaptive scheduling.
 
 ## **11. Testing**
@@ -491,9 +536,6 @@ The following types of workloads provide insights into operator performance and 
 * **JSONL aggregation:** Validates key-based grouping, serialization speed, and reduce_by_key efficiency.
 * **Reduce-heavy loads:** Stress-tests CPU-bound operators and verifies the performance of multi-threaded execution.
 
-
-CHECK
-
 ### **Performance Metrics**
 
 Benchmarking should focus on the following dimensions:
@@ -516,8 +558,6 @@ The engine supports the following reliability features:
 * **Task retries on new worker:** Any task that was assigned to a dropped or unresponsive worker is automatically rescheduled onto a different worker. This ensures that no DAG stage is left incomplete.
 * **Idempotent attempt tracking:** Each task execution attempt is uniquely tracked, allowing the master to differentiate between fresh executions and duplicated attempts caused by failures.
 
-check 
-
 Together, these mechanisms provide a solid foundation for predictable distributed execution, even in scenarios where worker nodes fail unexpectedly or behave unreliably.
 
 
@@ -531,7 +571,6 @@ Distributed systems can fail in subtle and unexpected ways due to concurrent exe
 | **No workers available** | There are no active workers registered (none started or all marked DOWN), so tasks cannot be scheduled until a worker joins. |
 | **Job stuck in RUNNING** | A worker may have crashed mid-task or become unresponsive; an unimplemented operator or invalid DAG parameters can also block progress. |
 | **Partition missing** | The spill directory may have been cleaned before job completion, or there was insufficient disk space during intermediate stage execution. |
-| **Scheduler panic** | The submitted DAG may contain cyclic dependencies or an invalid topological structure, causing the planner to fail during dependency resolution.  check|
 | **High task retry counts** | Workers may be failing tasks due to operator errors, insufficient resources, or data corruption; check worker logs for specific error messages. |
 
 In general, inspecting logs from both the master and workers provides immediate insight into runtime behavior. The system’s structured logging and heartbeat reports are designed to make these issues identifiable with minimal effort.
@@ -544,7 +583,6 @@ Because this project is an academic distributed engine, its security model is mi
 * **No authentication:** Any client capable of reaching the HTTP API may submit jobs or query the cluster, making it unsuitable for deployment on untrusted or public networks.
 * **Inputs must be trusted:** DAG definitions, file paths, and function parameters are accepted without sandboxing. Malformed or malicious input may cause unexpected behavior.
 * **Academic scope:** The design assumes a safe environment where nodes behave correctly, and adversarial attack resistance is not a goal.
-
     
 ## **16. License**
 
@@ -565,8 +603,27 @@ This project showcases the core principles behind a distributed batch-processing
 Through this approach, the engine bridges theoretical concepts from operating systems with practical distributed execution, offering a hands-on understanding of concurrency, synchronization, cluster coordination, and dataflow computation. It is a solid foundation for further improvements, optimizations, and extensions that could be integrated into real-world data processing systems. If you have any questions or would like to contribute, please feel free to reach out!
 
 A investigation paper detailing design decisions and performance analysis is avaiable at:  
-[Distributed Processing Engine](https://example.com/research-paper)
+[Distributed Processing Engine](https://estudianteccr-my.sharepoint.com/:f:/g/personal/bzamora_estudiantec_cr/IgB-PPmOYrX2S6v_O1bFdGcWARqvTl2N2HVdwdCJr8gy8ao?e=WFATnS)
+
+The source code repository is hosted at:  
+[GitHub - distributed_processing_engine](https://github.com/sfabricito/distributed_processing_engine)
 
 You can reach us at:  
-- Fabricio Solis Alpizar:
-- Pavel Zamora Araya: 
+- Fabricio Solis Alpizar: sfabricito@gmail.com
+- Pavel Zamora Araya: bzamora@estudiantec.cr
+
+## **18. Use of AI-Assisted Tools**
+
+Parts of this project’s documentation and development were supported through the use of **ChatGPT (OpenAI)** as an auxiliary tool. The model was used to:
+
+- Refine and format technical documentation (README, architecture descriptions, API summaries).
+- Assist in the organization and presentation of benchmark tables, diagrams, and explanations.
+- Provide guidance during debugging and design clarification, particularly for operator semantics, DAG structuring, and distributed-system terminology.
+- Improve clarity, structure, and consistency across written sections of the report.
+
+All system architecture, source code, algorithms, testing logic, and implementation decisions were authored by the team. AI was used strictly as a writing and clarification assistant, not as an autonomous code generator.
+
+### **AI Reference**
+- **ChatGPT (GPT-5.1), OpenAI**, used as a documentation and conceptual assistance tool.[ChatGPT](https://chat.openai.com/)
+
+
