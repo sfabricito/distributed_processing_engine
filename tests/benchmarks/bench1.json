@@ -1,0 +1,40 @@
+{
+  "partitions": 2,
+  "nodes": [
+    {
+      "id": "read",
+      "operator": {
+        "Read": {
+          "uri": "./data/input.json",
+          "format": "json"
+        }
+      }
+    },
+    {
+      "id": "map",
+      "operator": {
+        "Map": {
+          "script": "identity"
+        }
+      }
+    },
+    {
+      "id": "filter",
+      "operator": {
+        "Filter": {
+          "predicate": "always_true"
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": "read",
+      "to": "map"
+    },
+    {
+      "from": "map",
+      "to": "filter"
+    }
+  ]
+}

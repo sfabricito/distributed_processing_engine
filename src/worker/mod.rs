@@ -1,3 +1,4 @@
+use std::net::TcpListener;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -29,16 +30,9 @@ impl Worker {
         let worker_id = id
             .and_then(|raw| Uuid::parse_str(&raw).ok())
             .unwrap_or_else(Uuid::new_v4);
-        let listen_addr = format!(
-            "{}:{}",
-            config.worker_bind_host,
-            port.unwrap_or(config.worker_base_port)
-        );
-        let advertise_addr = format!(
-            "{}:{}",
-            config.worker_advertise_host,
-            port.unwrap_or(config.worker_base_port)
-        );
+        let chosen_port = choose_available_port(port.unwrap_or(config.worker_base_port));
+        let listen_addr = format!("{}:{}", config.worker_bind_host, chosen_port);
+        let advertise_addr = format!("{}:{}", config.worker_advertise_host, chosen_port);
         Self {
             id: worker_id,
             listen_addr,
@@ -111,6 +105,16 @@ impl Worker {
 
         Ok(())
     }
+}
+
+fn choose_available_port(start_port: u16) -> u16 {
+    for offset in 0..50u16 {
+        let port = start_port.saturating_add(offset);
+        if TcpListener::bind(("0.0.0.0", port)).is_ok() {
+            return port;
+        }
+    }
+    start_port
 }
 
 #[derive(Clone)]
